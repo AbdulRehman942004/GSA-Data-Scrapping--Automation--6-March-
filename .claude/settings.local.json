@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import pandas as pd; df = pd.read_excel\\(''New Requirements/GSA Advantage Low price.xlsx''\\); print\\(''Columns:'', list\\(df.columns\\)\\); print\\(''Shape:'', df.shape\\); print\\(''First 3 rows:''\\); print\\(df.head\\(3\\)\\)\")",
+      "Bash(pip install:*)",
+      "Bash(python -c \"import pandas as pd; df = pd.read_excel\\(''New Requirements/GSA Advantage Low price.xlsx''\\); print\\(''Columns:'', list\\(df.columns\\)\\); print\\(''Shape:'', df.shape\\); print\\(df.head\\(3\\).to_string\\(\\)\\)\")"
+    ]
+  }
+}
