@@ -4,7 +4,7 @@
 This project provides an automated pipeline for generating search links, normalizing manufacturer data, and scraping product information (price, unit of measure, and contractor) from the GSA Advantage platform.
 
 ## Project Structure
-The automation process is divided into four main stages:
+The automation process is divided into three main stages:
 
 1. **link_generation**
    Constructs direct GSA Advantage search URLs for each product in the input Excel file using a deterministic pattern, bypassing the need for browser interaction.
@@ -13,10 +13,7 @@ The automation process is divided into four main stages:
    Extracts unique manufacturer names from the dataset and normalizes them into a simplified root format for accurate matching during the scraping phase.
 
 3. **scraping**
-   Uses Selenium to navigate the generated GSA Advantage links, extract product details (price, unit, contractor), and match them against the normalized manufacturer roots using fuzzy logic.
-
-4. **update_missing_links**
-   Identifies products that failed during the initial scraping phase and updates their search links to use an alternative identifier (Item Number instead of Item Stock Number-Butted) for a secondary scraping pass.
+   Uses Selenium to navigate the generated GSA Advantage links, extract product details (price, unit, contractor), and match them against the normalized manufacturer roots using fuzzy logic. Also includes a utility to update search links for missing rows using alternative identifiers for a secondary scraping pass.
 
 ## Setup Instructions
 
