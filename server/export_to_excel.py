@@ -2,6 +2,7 @@ import pandas as pd
 from sqlalchemy import create_engine
 import os
 import sys
+import io
 from datetime import datetime
 
 # Ensure the root project dir is in sys.path so we can import modules
@@ -20,12 +21,8 @@ def export_to_excel():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     input_excel = os.path.join(script_dir, "new_requirements", "GSA Advantage Low price.xlsx")
     
-    output_dir = os.path.join(script_dir, "scrapped_data")
-    os.makedirs(output_dir, exist_ok=True)
-    
     timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     filename = f"gsa_scrapped_products_{timestamp}.xlsx"
-    output_excel = os.path.join(output_dir, filename)
     
     print(f"Reading base Excel file: {input_excel}")
     try:
@@ -63,17 +60,20 @@ def export_to_excel():
     for col in output_cols:
         if col not in df.columns:
             df[col] = ''
+        else:
+            df[col] = df[col].astype(object)
     
     # Create an easy lookup dictionary from part_number to data row
     print("Merging scraped data into Excel structure...")
     scraped_dict = {}
     for _, row in scraped_df.iterrows():
-        scraped_dict[str(row['part_number'])] = row
+        p_num = str(row['part_number']).strip()
+        scraped_dict[p_num] = row
         
     # Update the final dataframe
     updated_count = 0
     for idx, row in df.iterrows():
-        part_num = str(row[part_num_col])
+        part_num = str(row[part_num_col]).strip()
         if part_num in scraped_dict:
             data = scraped_dict[part_num]
             df.at[idx, '1 GSA Low Price'] = data['gsa_low_price_1'] if pd.notna(data['gsa_low_price_1']) else ''
@@ -86,15 +86,17 @@ def export_to_excel():
             
     print(f"Successfully matched and injected {updated_count} rows with scraped data.")
     
-    print(f"Saving final deliverable to: {output_excel}")
+    print(f"Generating dynamic in-memory Excel deliverable: {filename}")
     try:
-        df.to_excel(output_excel, index=False, engine='openpyxl')
+        output_buffer = io.BytesIO()
+        df.to_excel(output_buffer, index=False, engine='openpyxl')
+        output_buffer.seek(0)
     except Exception as e:
-        print(f"Error saving to Excel file: {e}")
+        print(f"Error compiling in-memory Excel data: {e}")
         return None
         
-    print(f"Done! Export completed successfully. Saved to: {output_excel}")
-    return output_excel
+    print(f"Done! API Export memory buffer prepared successfully.")
+    return output_buffer, filename
 
 if __name__ == "__main__":
     export_to_excel()

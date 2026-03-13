@@ -49,6 +49,12 @@ class GSAScrapingAutomation:
         
         self.engine = None
         self._setup_db()
+        self.stop_requested = False
+
+    def stop(self):
+        """Signal the automation to stop as soon as possible"""
+        self.stop_requested = True
+        logger.info("Stop signal received. Finishing current task...")
 
     def _setup_db(self):
         """Initialize database connection"""
@@ -651,6 +657,9 @@ class GSAScrapingAutomation:
             start_time = time.time()
 
             for i, row in df.head(item_limit).iterrows():
+                if self.stop_requested:
+                    logger.warning("Stop requested. Exiting loop.")
+                    break
                 try:
                     manufacturer = row[column_mapping['manufacturer']]
                     part_number = row[column_mapping['part_number']]
@@ -720,6 +729,9 @@ class GSAScrapingAutomation:
             start_time = time.time()
 
             for i, row in df.iterrows():
+                if self.stop_requested:
+                    logger.warning("Stop requested. Exiting loop.")
+                    break
                 try:
                     manufacturer = row[column_mapping['manufacturer']]
                     part_number = row[column_mapping['part_number']]
@@ -803,6 +815,9 @@ class GSAScrapingAutomation:
             total = end_idx - start_idx + 1
 
             for offset, i in enumerate(range(start_idx, end_idx + 1), 1):
+                if self.stop_requested:
+                    logger.warning("Stop requested. Exiting loop.")
+                    break
                 try:
                     row = df.iloc[i]
                     manufacturer = df.at[i, column_mapping['manufacturer']]
@@ -891,6 +906,9 @@ class GSAScrapingAutomation:
             total = len(missing_rows)
 
             for offset, i in enumerate(missing_rows, 1):
+                if self.stop_requested:
+                    logger.warning("Stop requested. Exiting loop.")
+                    break
                 try:
                     manufacturer = df.at[i, column_mapping['manufacturer']]
                     part_number = df.at[i, column_mapping['part_number']]

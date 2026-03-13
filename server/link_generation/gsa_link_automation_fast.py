@@ -33,6 +33,12 @@ class GSALinkAutomationFast:
         self.base_url = config['gsa_urls']['base_url']
         self.url_template = config['gsa_urls']['url_template']
         self._setup_db()
+        self.stop_requested = False
+
+    def stop(self):
+        """Signal the automation to stop as soon as possible"""
+        self.stop_requested = True
+        logger.info("Stop signal received. Finishing current task...")
         
     def _setup_db(self):
         """Initialize database connection"""
@@ -265,6 +271,9 @@ class GSALinkAutomationFast:
             start_time = time.time()
 
             for i, part_number in enumerate(part_numbers, 1):
+                if self.stop_requested:
+                    logger.warning("Stop requested. Exiting loop.")
+                    break
                 # Construct the URL directly
                 gsa_url = self.construct_gsa_url(part_number)
 
@@ -340,6 +349,9 @@ class GSALinkAutomationFast:
             start_time = time.time()
             
             for i, stock_number in enumerate(test_stock_numbers, 1):
+                if self.stop_requested:
+                    logger.warning("Stop requested. Exiting loop.")
+                    break
                 # Construct the URL directly
                 gsa_url = self.construct_gsa_url(stock_number)
                 
@@ -401,6 +413,9 @@ class GSALinkAutomationFast:
             start_time = time.time()
             
             for i, stock_number in enumerate(custom_stock_numbers, 1):
+                if self.stop_requested:
+                    logger.warning("Stop requested. Exiting loop.")
+                    break
                 actual_row = start_row + i - 1  # Calculate actual row number
                 
                 # Construct the URL directly

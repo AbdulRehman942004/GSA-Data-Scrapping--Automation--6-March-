@@ -50,7 +50,38 @@ export const startScraping = async (data: ScrapingRequest) => {
   return response.data;
 };
 
-export const downloadExport = () => {
-  // Instead of an axios call, just directly hit the endpoint to trigger the browser's native file download dialog.
-  window.open(`${SERVER_URL}/api/export`, '_blank');
+export const stopLinkGeneration = async () => {
+  const response = await api.post('/api/links/stop');
+  return response.data;
 };
+
+export const stopScraping = async () => {
+  const response = await api.post('/api/scrape/stop');
+  return response.data;
+};
+
+
+export const downloadExport = async () => {
+  // Use axios instead of window location so we can await the download completion for loading states
+  const response = await api.get('/api/export', { responseType: 'blob' });
+  
+  const url = window.URL.createObjectURL(new Blob([response.data]));
+  const link = document.createElement('a');
+  link.href = url;
+  
+  let filename = 'GSA_Export.xlsx';
+  const contentDisposition = response.headers['content-disposition'];
+  if (contentDisposition) {
+    const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+    if (filenameMatch && filenameMatch.length > 1) {
+      filename = filenameMatch[1];
+    }
+  }
+  
+  link.setAttribute('download', filename);
+  document.body.appendChild(link);
+  link.click();
+  link?.parentNode?.removeChild(link);
+  window.URL.revokeObjectURL(url);
+};
+

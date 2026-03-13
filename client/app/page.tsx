@@ -10,10 +10,20 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Form states
-  const [linkMode, setLinkMode] = useState<'test' | 'full' | 'custom'>('test');
-  const [scrapeMode, setScrapeMode] = useState<'test' | 'full' | 'missing' | 'custom'>('test');
+  // Global Test Mode State
+  const [isTestMode, setIsTestMode] = useState(true);
   const [itemLimit, setItemLimit] = useState(5);
+  const [isExporting, setIsExporting] = useState(false);
+
+  const toggleTestMode = () => {
+    const newMode = !isTestMode;
+    setIsTestMode(newMode);
+    if (newMode) {
+      toast("Test Mode Enabled: Automation runs are extremely limited to prevent heavy data usage.", { icon: '🧪', duration: 10000 });
+    } else {
+      toast("Full Mode Enabled: Automation sweeps will aggressively process the entire available dataset.", { icon: '🚀', duration: 10000 });
+    }
+  };
 
   // Refs to track previous status for completion detection
   const prevLinkRunning = useRef<boolean>(false);
@@ -56,9 +66,10 @@ export default function Dashboard() {
 
   const handleLinkGeneration = async () => {
     try {
-      toast.loading("Initiating Link Generation...", { id: 'linkGen' });
-      await api.startLinkGeneration({ mode: linkMode, item_limit: itemLimit });
-      toast.success("Link Generation queued successfully!", { id: 'linkGen' });
+      const mode = isTestMode ? 'test' : 'full';
+      toast.loading(`Initiating ${isTestMode ? 'Test' : 'Full'} Link Generation...`, { id: 'linkGen' });
+      await api.startLinkGeneration({ mode, item_limit: isTestMode ? itemLimit : undefined });
+      toast.success(`Link Generation (${mode}) queued successfully!`, { id: 'linkGen' });
       fetchStatus();
     } catch (err: any) {
       toast.error(`Error queueing Link Generation: ${err?.response?.data?.detail || err.message}`, { id: 'linkGen' });
@@ -67,18 +78,49 @@ export default function Dashboard() {
 
   const handleScraping = async () => {
     try {
-      toast.loading("Initiating Selenium Scraper...", { id: 'scrape' });
-      await api.startScraping({ mode: scrapeMode, item_limit: itemLimit });
-      toast.success("Selenium Scraping queued successfully!", { id: 'scrape' });
+      const mode = isTestMode ? 'test' : 'full';
+      toast.loading(`Initiating ${isTestMode ? 'Test' : 'Full'} Selenium Scraper...`, { id: 'scrape' });
+      await api.startScraping({ mode, item_limit: isTestMode ? itemLimit : undefined });
+      toast.success(`Selenium Scraping (${mode}) queued successfully!`, { id: 'scrape' });
       fetchStatus();
     } catch (err: any) {
       toast.error(`Error queueing Scraping: ${err?.response?.data?.detail || err.message}`, { id: 'scrape' });
     }
   };
 
-  const handleExport = () => {
-    toast.success("Beginning data compilation and download...");
-    api.downloadExport();
+  const handleStopLinkGen = async () => {
+    try {
+      toast.loading("Sending stop signal to Link Engine...", { id: 'linkGenStop' });
+      await api.stopLinkGeneration();
+      toast.success("Stop signal received. Terminating shortly.", { id: 'linkGenStop' });
+      fetchStatus();
+    } catch (err: any) {
+      toast.error(`Stop failed: ${err.message}`, { id: 'linkGenStop' });
+    }
+  };
+
+  const handleStopScraping = async () => {
+    try {
+      toast.loading("Sending stop signal to Selenium Scraper...", { id: 'scrapeStop' });
+      await api.stopScraping();
+      toast.success("Stop signal received. Driver will close soon.", { id: 'scrapeStop' });
+      fetchStatus();
+    } catch (err: any) {
+      toast.error(`Stop failed: ${err.message}`, { id: 'scrapeStop' });
+    }
+  };
+
+  const handleExport = async () => {
+    try {
+      setIsExporting(true);
+      toast.loading("Generating and compiling .XLSX Deliverable...", { id: 'export' });
+      await api.downloadExport();
+      toast.success("Excel bundle generated and downloaded successfully!", { id: 'export' });
+    } catch (err: any) {
+      toast.error(`Export failed: ${err.message}`, { id: 'export' });
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   return (
@@ -96,12 +138,34 @@ export default function Dashboard() {
             </h1>
             <p className="text-slate-500 mt-2 text-sm">Automated pipeline control center for GSA Advantage Pricing</p>
           </div>
-          <div className="flex items-center gap-3">
-            <span className="flex h-3 w-3 relative">
-              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${error ? 'bg-red-400' : 'bg-emerald-400'}`}></span>
-              <span className={`relative inline-flex rounded-full h-3 w-3 ${error ? 'bg-red-500' : 'bg-emerald-500'}`}></span>
-            </span>
-            <span className={`text-sm font-semibold tracking-wide ${error ? 'text-red-600' : 'text-slate-700'}`}>{error ? 'Disconnected' : 'Server Online'}</span>
+          
+          <div className="flex flex-wrap items-center gap-4">
+            {/* Native Topbar Toggle Switch */}
+            <button 
+              onClick={toggleTestMode} 
+              className="group flex items-center gap-2.5 px-3 py-1.5 border rounded-lg transition-all bg-white hover:bg-slate-50 border-slate-200 shadow-sm"
+              title="Toggle between testing a small batch of records vs full execution"
+            >
+              <div className={`relative flex items-center w-10 h-5 rounded-full transition-colors ${isTestMode ? 'bg-blue-500' : 'bg-slate-200'}`}>
+                <div className={`absolute w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform ${isTestMode ? 'translate-x-[22px]' : 'translate-x-1'}`} />
+              </div>
+              <span className={`text-sm font-semibold transition-colors ${isTestMode ? 'text-blue-600' : 'text-slate-600'}`}>
+                {isTestMode ? 'Test Mode Enabled' : 'Full Execution Ready'}
+              </span>
+            </button>
+            
+            <div className="hidden md:block w-px h-6 bg-slate-200" />
+            
+            {/* Server Status Radar */}
+            <div className="flex items-center gap-2">
+              <span className="flex h-2.5 w-2.5 relative">
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${error ? 'bg-red-400' : 'bg-emerald-400'}`}></span>
+                <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${error ? 'bg-red-500' : 'bg-emerald-500'}`}></span>
+              </span>
+              <span className={`text-sm font-semibold tracking-wide ${error ? 'text-red-600' : 'text-slate-700'}`}>
+                {error ? 'Disconnected' : 'Server Online'}
+              </span>
+            </div>
           </div>
         </div>
 
@@ -159,20 +223,13 @@ export default function Dashboard() {
             </div>
 
             <div className="space-y-4 relative z-10">
-              <div className="flex flex-col gap-2">
-                <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Operation Mode</label>
-                <select 
-                  className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-blue-500/50 shadow-sm transition-all"
-                  value={linkMode}
-                  onChange={(e) => setLinkMode(e.target.value as any)}
-                  disabled={status?.is_link_generation_running}
-                >
-                  <option value="test">Test Mode (Limited Items)</option>
-                  <option value="full">Super Fast Automation (Full Data)</option>
-                </select>
-              </div>
-
-              {linkMode === 'test' && (
+              
+              {!isTestMode ? (
+                 <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl text-slate-600 text-sm font-medium flex items-center gap-3">
+                   <Rocket className="w-5 h-5 text-slate-400" />
+                   Fully configured for massive unthrottled url generation run.
+                 </div>
+              ) : (
                 <div className="flex flex-col gap-2">
                   <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Test Sample Limit</label>
                   <input 
@@ -180,22 +237,34 @@ export default function Dashboard() {
                     value={itemLimit}
                     onChange={(e) => setItemLimit(Number(e.target.value))}
                     min={1} max={100}
-                    className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-blue-500/50 shadow-sm transition-all"
+                    className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-blue-500/50 shadow-sm transition-all"
                   />
                 </div>
               )}
 
-              <button 
-                onClick={handleLinkGeneration}
-                disabled={status?.is_link_generation_running || !!error}
-                className="w-full mt-4 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:hover:bg-blue-600 text-white font-semibold px-4 py-3 rounded-xl transition-all shadow-md active:scale-[0.98]"
-              >
-                {status?.is_link_generation_running ? (
-                  <><Loader2 className="w-5 h-5 animate-spin" /> Link Engine Active...</>
-                ) : (
-                  <><Search className="w-5 h-5" /> Launch URL Extractor</>
-                )}
-              </button>
+                <div className="flex gap-2 mt-4">
+                  <button 
+                    onClick={handleLinkGeneration}
+                    disabled={status?.is_link_generation_running || !!error}
+                    className="flex-1 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:hover:bg-blue-600 text-white font-semibold px-4 py-3 rounded-xl transition-all shadow-md active:scale-[0.98]"
+                  >
+                    {status?.is_link_generation_running ? (
+                      <><Loader2 className="w-5 h-5 animate-spin" /> Link Engine Active...</>
+                    ) : (
+                      <><Search className="w-5 h-5" /> Launch URL Extractor</>
+                    )}
+                  </button>
+                  
+                  {status?.is_link_generation_running && (
+                    <button 
+                      onClick={handleStopLinkGen}
+                      className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 font-bold px-6 py-3 rounded-xl transition-all active:scale-95"
+                      title="Forcibly stop link generation"
+                    >
+                      Stop
+                    </button>
+                  )}
+                </div>
             </div>
           </div>
 
@@ -216,21 +285,13 @@ export default function Dashboard() {
             </div>
 
             <div className="space-y-4 relative z-10">
-              <div className="flex flex-col gap-2">
-                <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Operation Mode</label>
-                <select 
-                  className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-emerald-500/50 shadow-sm transition-all"
-                  value={scrapeMode}
-                  onChange={(e) => setScrapeMode(e.target.value as any)}
-                  disabled={status?.is_scraping_running}
-                >
-                  <option value="test">Test Mode (First Records)</option>
-                  <option value="full">Full Scrape Workflow</option>
-                  <option value="missing">Fill Missing Records Extractor</option>
-                </select>
-              </div>
-
-              {scrapeMode === 'test' && (
+              
+              {!isTestMode ? (
+                 <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl text-slate-600 text-sm font-medium flex items-center gap-3">
+                   <Bot className="w-5 h-5 text-slate-400" />
+                   Fully configured for massive unthrottled Selenium price scraping.
+                 </div>
+              ) : (
                 <div className="flex flex-col gap-2">
                   <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Test Sample Limit</label>
                   <input 
@@ -238,22 +299,34 @@ export default function Dashboard() {
                     value={itemLimit}
                     onChange={(e) => setItemLimit(Number(e.target.value))}
                     min={1} max={100}
-                    className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-emerald-500/50 shadow-sm transition-all"
+                    className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-emerald-500/50 shadow-sm transition-all"
                   />
                 </div>
               )}
 
-              <button 
-                onClick={handleScraping}
-                disabled={status?.is_scraping_running || !!error}
-                className="w-full mt-4 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:hover:bg-emerald-600 text-white font-semibold px-4 py-3 rounded-xl transition-all shadow-md active:scale-[0.98]"
-              >
-                {status?.is_scraping_running ? (
-                  <><Loader2 className="w-5 h-5 animate-spin" /> Running Selenium...</>
-                ) : (
-                  <><CheckCircle className="w-5 h-5" /> Start Price Extraction</>
-                )}
-              </button>
+                <div className="flex gap-2 mt-4">
+                  <button 
+                    onClick={handleScraping}
+                    disabled={status?.is_scraping_running || !!error}
+                    className="flex-1 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:hover:bg-emerald-600 text-white font-semibold px-4 py-3 rounded-xl transition-all shadow-md active:scale-[0.98]"
+                  >
+                    {status?.is_scraping_running ? (
+                      <><Loader2 className="w-5 h-5 animate-spin" /> Running Selenium...</>
+                    ) : (
+                      <><CheckCircle className="w-5 h-5" /> Start Price Extraction</>
+                    )}
+                  </button>
+
+                  {status?.is_scraping_running && (
+                    <button 
+                      onClick={handleStopScraping}
+                      className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 font-bold px-6 py-3 rounded-xl transition-all active:scale-95"
+                      title="Forcibly stop scraping"
+                    >
+                      Stop
+                    </button>
+                  )}
+                </div>
             </div>
           </div>
         </div>
@@ -272,10 +345,14 @@ export default function Dashboard() {
             </div>
             <button 
               onClick={handleExport}
-              className="group whitespace-nowrap flex items-center gap-3 bg-white hover:bg-slate-100 text-slate-900 font-bold px-6 py-3.5 rounded-xl transition-all shadow-lg active:scale-95"
+              disabled={isExporting || !!error}
+              className="group whitespace-nowrap flex items-center justify-center min-w-[240px] gap-3 bg-white hover:bg-slate-100 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed text-slate-900 font-bold px-6 py-3.5 rounded-xl transition-all shadow-lg active:scale-95"
             >
-              <Download className="w-5 h-5 group-hover:-translate-y-0.5 transition-transform" /> 
-              Download Final .XLSX
+              {isExporting ? (
+                <><Loader2 className="w-5 h-5 animate-spin text-blue-500" /> Compiling Data...</>
+              ) : (
+                <><Download className="w-5 h-5 group-hover:-translate-y-0.5 transition-transform" /> Download Final .XLSX</>
+              )}
             </button>
           </div>
         </div>

@@ -1,6 +1,6 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 import os
 import threading
@@ -36,6 +36,10 @@ state_lock = threading.Lock()
 is_link_generation_running = False
 is_scraping_running = False
 
+# Active automation objects for stopping
+active_link_automation = None
+active_scraping_automation = None
+
 # Constants
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCEL_FILE = os.path.join(SCRIPT_DIR, "new_requirements", "GSA Advantage Low price.xlsx")
@@ -55,9 +59,10 @@ class ScrapingRequest(BaseModel):
 
 # Background task functions
 def task_run_link_generation(req: LinkGenerationRequest):
-    global is_link_generation_running
+    global is_link_generation_running, active_link_automation
     try:
         automation = GSALinkAutomationFast(EXCEL_FILE)
+        active_link_automation = automation
         
         if req.mode == "test":
             automation.run_automation_fast_test_mode(req.item_limit)
@@ -71,11 +76,13 @@ def task_run_link_generation(req: LinkGenerationRequest):
     finally:
         with state_lock:
             is_link_generation_running = False
+            active_link_automation = None
 
 def task_run_scraping(req: ScrapingRequest):
-    global is_scraping_running
+    global is_scraping_running, active_scraping_automation
     try:
         automation = GSAScrapingAutomation(EXCEL_FILE, MFR_MAPPING_FILE)
+        active_scraping_automation = automation
         
         if req.mode == "test":
             automation.run_scraping_test_mode(req.item_limit)
@@ -91,6 +98,7 @@ def task_run_scraping(req: ScrapingRequest):
     finally:
         with state_lock:
             is_scraping_running = False
+            active_scraping_automation = None
 
 # API Routes
 @app.get("/")
@@ -121,6 +129,22 @@ async def start_scraping(req: ScrapingRequest, background_tasks: BackgroundTasks
     background_tasks.add_task(task_run_scraping, req)
     return {"status": "started", "message": f"Scraping mode '{req.mode}' has been queued."}
 
+@app.post("/api/links/stop")
+async def stop_links():
+    global active_link_automation
+    if active_link_automation:
+        active_link_automation.stop()
+        return {"status": "stopping", "message": "Link generation stop signal sent."}
+    return {"status": "idle", "message": "Link generation is not running."}
+
+@app.post("/api/scrape/stop")
+async def stop_scrape():
+    global active_scraping_automation
+    if active_scraping_automation:
+        active_scraping_automation.stop()
+        return {"status": "stopping", "message": "Scraping stop signal sent."}
+    return {"status": "idle", "message": "Scraping is not running."}
+
 @app.get("/api/status")
 async def get_status():
     engine = get_engine()
@@ -148,19 +172,22 @@ async def get_status():
 async def download_export():
     """Generates the final Excel file dynamically from Postgres data and downloads it."""
     
-    # Run the export function synchronously. Alternatively, if this gets 
-    # extremely slow over time, it could happen in a background task too.
-    # Right now, 20 seconds is perfectly acceptable.
+    # Run the export function synchronously and get in-memory buffer + dynamic filename
+    result = export_to_excel()
     
-    exported_file_path = export_to_excel()
-    
-    if not exported_file_path or not os.path.exists(exported_file_path):
-        raise HTTPException(status_code=500, detail="The export processing failed.")
+    if not result:
+        raise HTTPException(status_code=500, detail="The export compilation process failed.")
         
-    return FileResponse(
-        path=exported_file_path, 
-        filename=os.path.basename(exported_file_path),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    output_buffer, filename = result
+        
+    headers = {
+        'Content-Disposition': f'attachment; filename="{filename}"'
+    }
+        
+    return StreamingResponse(
+        iter([output_buffer.getvalue()]), 
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers
     )
 
 if __name__ == "__main__":
