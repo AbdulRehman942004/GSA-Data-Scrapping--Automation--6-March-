@@ -11,30 +11,16 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from difflib import SequenceMatcher
-import logging
-from sqlmodel import Field, Session, SQLModel, create_engine, select
 from dotenv import load_dotenv
+import sys
+import logging
+import yaml
+from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-load_dotenv()
-
-class GSALink(SQLModel, table=True):
-    __tablename__ = 'gsa_links'
-    part_number: str = Field(primary_key=True)
-    gsa_link: str = Field()
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    is_scraped: bool = Field(default=False)
-
-class GSAScrapedData(SQLModel, table=True):
-    __tablename__ = 'gsa_scraped_data'
-    id: int = Field(default=None, primary_key=True)
-    part_number: str = Field(index=True)
-    gsa_low_price_1: float = Field(default=None)
-    unit_1: str = Field(default=None)
-    contractor_1: str = Field(default=None)
-    gsa_low_price_2: float = Field(default=None)
-    unit_2: str = Field(default=None)
-    contractor_2: str = Field(default=None)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+# Ensure the root project dir is in sys.path so we can import models.py
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from database.models import GSALink, GSAScrapedData
+from database.db import get_engine
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -67,15 +53,7 @@ class GSAScrapingAutomation:
     def _setup_db(self):
         """Initialize database connection"""
         try:
-            host = os.getenv("POSTGRESQL_HOST", "localhost")
-            port = os.getenv("POSTGRESQL_PORT", "5432")
-            database = os.getenv("POSTGRESQL_DATABASE", "gsa_data")
-            username = os.getenv("POSTGRESQL_USERNAME", "postgres")
-            password = os.getenv("POSTGRESQL_PASSWORD", "12345")
-            
-            db_url = f"postgresql://{username}:{password}@{host}:{port}/{database}"
-            self.engine = create_engine(db_url)
-            
+            self.engine = get_engine()
             SQLModel.metadata.create_all(self.engine)
             logger.info("Database connection setup successfully.")
         except Exception as e:
@@ -658,7 +636,7 @@ class GSAScrapingAutomation:
     # Run modes
     # ─────────────────────────────────────────────────────────────────
 
-    def run_scraping_test_mode(self, test_count=3):
+    def run_scraping_test_mode(self, item_limit=3):
         """Test with the first N rows"""
         try:
             if not self.load_manufacturer_mapping():
@@ -672,7 +650,7 @@ class GSAScrapingAutomation:
             successful = 0
             start_time = time.time()
 
-            for i, row in df.head(test_count).iterrows():
+            for i, row in df.head(item_limit).iterrows():
                 try:
                     manufacturer = row[column_mapping['manufacturer']]
                     part_number = row[column_mapping['part_number']]
@@ -691,7 +669,7 @@ class GSAScrapingAutomation:
                         continue
 
                     gsa_url = link_record.gsa_link
-                    print(f"\nTest {i + 1}/{test_count} - {part_number} | Mfr: {manufacturer}")
+                    print(f"\nTest {i + 1}/{item_limit} - {part_number} | Mfr: {manufacturer}")
                     t0 = time.time()
 
                     products_data = self.scrape_gsa_page(gsa_url, manufacturer)
@@ -717,7 +695,7 @@ class GSAScrapingAutomation:
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
 
-            print(f"\nTest complete. {successful}/{test_count} successful in {time.time()-start_time:.1f}s")
+            print(f"\nTest complete. {successful}/{item_limit} successful in {time.time()-start_time:.1f}s")
             return True
 
         except Exception as e:

@@ -6,6 +6,14 @@ import shutil
 from datetime import datetime
 import logging
 from sqlmodel import Field, Session, SQLModel, create_engine, select
+import sys
+import os
+import yaml
+
+# Ensure the root project dir is in sys.path so we can import models.py
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from database.models import GSALink
+from database.db import get_engine
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -13,32 +21,23 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
-
-class GSALink(SQLModel, table=True):
-    __tablename__ = 'gsa_links'
-    part_number: str = Field(primary_key=True)
-    gsa_link: str = Field()
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    is_scraped: bool = Field(default=False)
-
 class GSALinkAutomationFast:
     def __init__(self, excel_file_path):
         self.excel_file_path = excel_file_path
-        self.base_url = "https://www.gsaadvantage.gov/advantage/ws/search/advantage_search"
-        self.url_template = "?searchType=1&q=7:1{part_number}&s=6&c=25"
+        
+        # Load config
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.yml')
+        with open(config_path, 'r') as file:
+            config = yaml.safe_load(file)
+            
+        self.base_url = config['gsa_urls']['base_url']
+        self.url_template = config['gsa_urls']['url_template']
         self._setup_db()
         
     def _setup_db(self):
         """Initialize database connection"""
         try:
-            host = os.getenv("POSTGRESQL_HOST", "localhost")
-            port = os.getenv("POSTGRESQL_PORT", "5432")
-            database = os.getenv("POSTGRESQL_DATABASE", "gsa_data")
-            username = os.getenv("POSTGRESQL_USERNAME", "postgres")
-            password = os.getenv("POSTGRESQL_PASSWORD", "12345")
-            
-            db_url = f"postgresql://{username}:{password}@{host}:{port}/{database}"
-            self.engine = create_engine(db_url)
+            self.engine = get_engine()
             
             # Create table if it doesn't exist
             SQLModel.metadata.create_all(self.engine)
@@ -322,7 +321,7 @@ class GSALinkAutomationFast:
             logger.error(f"Error in super-fast automation: {str(e)}")
             return False
     
-    def run_automation_fast_test_mode(self, test_count=5):
+    def run_automation_fast_test_mode(self, item_limit=5):
         """Test method to run super-fast automation with limited items"""
         try:
             # Read Excel data
@@ -332,7 +331,7 @@ class GSALinkAutomationFast:
                 return False
             
             stock_numbers = df[stock_column_name].dropna().astype(str).tolist()
-            test_stock_numbers = stock_numbers[:test_count]
+            test_stock_numbers = stock_numbers[:item_limit]
             
             logger.info(f"Test mode: Processing {len(test_stock_numbers)} stock numbers")
             
