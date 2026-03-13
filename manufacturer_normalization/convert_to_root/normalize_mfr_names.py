@@ -89,7 +89,7 @@ def write_mapping_csv(rows: List[Tuple[str, str]], output_csv: Path) -> None:
 def parse_args() -> argparse.Namespace:
     project_dir = Path(__file__).resolve().parents[1]
 
-    default_input = project_dir / "indentifying unique mfr in the excel" / "unique_manufacturers.txt"
+    default_input = project_dir / "identify_unique_mfr" / "unique_manufacturers.txt"
     default_output = Path(__file__).parent / "original_to_root.csv"
 
     parser = argparse.ArgumentParser(description="Normalize manufacturer names to root form.")

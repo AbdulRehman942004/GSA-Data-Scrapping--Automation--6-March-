@@ -404,7 +404,7 @@ class GSALinkAutomationFast:
 def main():
     """Main function to run the super-fast automation"""
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    excel_file = os.path.join(script_dir, "..", "New Requirements", "GSA Advantage Low price.xlsx")
+    excel_file = os.path.join(script_dir, "..", "new_requirements", "GSA Advantage Low price.xlsx")
 
     while True:
         print("\n" + "="*60)

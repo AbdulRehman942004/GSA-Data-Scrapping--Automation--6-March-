@@ -168,14 +168,14 @@ def update_links_for_missing_rows(excel_file):
     return True
 
 if __name__ == "__main__":
-    # Get the script directory and construct path to Excel file in "3 Scrapping" folder
+    # Get the script directory and construct path to Excel file in "scraping" folder
     script_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(script_dir)
-    excel_file = os.path.join(parent_dir, "3 Scrapping", "essendant-product-list_with_gsa_scraped_data.xlsx")
+    excel_file = os.path.join(parent_dir, "scraping", "essendant-product-list_with_gsa_scraped_data.xlsx")
     
     if not os.path.exists(excel_file):
         print(f"ERROR: Excel file not found: {excel_file}")
-        print(f"Please ensure the Excel file exists in the '3 Scrapping' folder.")
+        print(f"Please ensure the Excel file exists in the 'scraping' folder.")
         exit(1)
     
     print("="*60)

@@ -6,7 +6,7 @@ This folder contains a script to update GSA Advantage links for products that we
 
 ## Purpose
 
-After running the main scraping script in the `3 Scrapping` folder, some products may not be found because:
+After running the main scraping script in the `scraping` folder, some products may not be found because:
 - The Item Stock Number-Butted in the link doesn't match the product on GSA Advantage
 - The product might be searchable using the Item Number instead
 - The link format needs to be updated to use a different identifier
@@ -53,13 +53,13 @@ https://www.gsaadvantage.gov/advantage/ws/search/advantage_search?searchType=1&q
    pip install pandas openpyxl
    ```
 
-2. Make sure the Excel file `essendant-product-list_with_gsa_scraped_data.xlsx` exists in the `3 Scrapping` folder
+2. Make sure the Excel file `essendant-product-list_with_gsa_scraped_data.xlsx` exists in the `scraping` folder
 
 ### Running the Script
 
 1. Navigate to this folder:
    ```bash
-   cd "4 Update links for missing rows"
+   cd "update_missing_links"
    ```
 
 2. Run the script:
@@ -68,7 +68,7 @@ https://www.gsaadvantage.gov/advantage/ws/search/advantage_search?searchType=1&q
    ```
 
 3. The script will:
-   - Read the Excel file from `../3 Scrapping/essendant-product-list_with_gsa_scraped_data.xlsx`
+   - Read the Excel file from `../scraping/essendant-product-list_with_gsa_scraped_data.xlsx`
    - Identify rows with missing GSA data
    - Update the links for those rows
    - Create a backup file
@@ -88,9 +88,9 @@ After running this script:
 
 1. **Verify the Updates**: Check the Excel file to ensure links were updated correctly
 
-2. **Re-run Scraping**: Go back to the `3 Scrapping` folder and run the main scraping script:
+2. **Re-run Scraping**: Go back to the `scraping` folder and run the main scraping script:
    ```bash
-   cd "../3 Scrapping"
+   cd "../scraping"
    python gsa_scraping_automation.py
    ```
 
@@ -111,8 +111,8 @@ After running this script:
 ## Troubleshooting
 
 ### Error: Excel file not found
-- Ensure the Excel file `essendant-product-list_with_gsa_scraped_data.xlsx` exists in the `3 Scrapping` folder
-- Check that the folder structure is correct: `3 Scrapping/` should be a sibling folder to `4 Update links for missing rows/`
+- Ensure the Excel file `essendant-product-list_with_gsa_scraped_data.xlsx` exists in the `scraping` folder
+- Check that the folder structure is correct: `scraping/` should be a sibling folder to `update_missing_links/`
 
 ### Error: Permission denied
 - Close the Excel file if it's open in Microsoft Excel
@@ -126,11 +126,11 @@ After running this script:
 ## Workflow Summary
 
 ```
-1. Run main scraping script (3 Scrapping/gsa_scraping_automation.py)
+1. Run main scraping script (scraping/gsa_scraping_automation.py)
    ↓
 2. Some products not found (missing GSA data)
    ↓
-3. Run this script (4 Update links for missing rows/update_links_for_missing_rows.py)
+3. Run this script (update_missing_links/update_links_for_missing_rows.py)
    ↓
 4. Links updated to use Item Number instead of Item Stock Number-Butted
    ↓
@@ -143,7 +143,7 @@ After running this script:
 
 - **Script Language**: Python 3
 - **Dependencies**: pandas, openpyxl
-- **Excel File Location**: `../3 Scrapping/essendant-product-list_with_gsa_scraped_data.xlsx`
+- **Excel File Location**: `../scraping/essendant-product-list_with_gsa_scraped_data.xlsx`
 - **Backup Location**: Same folder as the Excel file
 - **Link Pattern**: Uses regex `(q=7:)([^&]+)` to find and replace the item identifier
 

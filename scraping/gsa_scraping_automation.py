@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 
-EXCEL_FILE = os.path.join(PROJECT_DIR, "1 GSA link generation", "GSA Advantage Low price_with_gsa_links.xlsx")
-MFR_MAPPING_FILE = os.path.join(PROJECT_DIR, "2 coverting mfr names into root form", "coverting to root form", "original_to_root.csv")
+EXCEL_FILE = os.path.join(PROJECT_DIR, "link_generation", "GSA Advantage Low price_with_gsa_links.xlsx")
+MFR_MAPPING_FILE = os.path.join(PROJECT_DIR, "manufacturer_normalization", "convert_to_root", "original_to_root.csv")
 
 
 class GSAScrapingAutomation:
