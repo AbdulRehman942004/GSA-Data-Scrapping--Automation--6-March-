@@ -68,13 +68,25 @@ class GSAScrapingAutomation:
             re.compile(r'\bbrand[:\s]*([a-z0-9\s&.,®\-]+)', re.IGNORECASE)
         ]
 
-        # Unit patterns
-        self._unit_patterns = [
-            re.compile(r'\$\s*[\d,]+\.?\d*\s*/\s*([a-z]+)', re.IGNORECASE),
-            re.compile(r'unit[:\s]*([a-zA-Z]+)', re.IGNORECASE),
-            re.compile(r'uom[:\s]*([a-zA-Z]+)', re.IGNORECASE),
-            re.compile(r'\b(EA|BX|PK|CS|RL|DZ|PR|BG|ST|RM)\b', re.IGNORECASE),
-        ]
+        # Unit patterns - used as fallback only; primary extraction is line-based
+        # Pattern: price/unit with slash e.g. "$80.00/EA"
+        self._unit_slash_pattern = re.compile(
+            r'\$\s*[\d,]+\.?\d*\s*/\s*([A-Za-z]{1,4})\b', re.IGNORECASE
+        )
+        # Pattern: strict labeled UOM field e.g. "uom: EA"
+        self._unit_uom_pattern = re.compile(
+            r'\buom\b\s*:\s*([A-Za-z]{1,4})\b', re.IGNORECASE
+        )
+        # Pattern: strict labeled unit field with colon e.g. "unit: EA"
+        # Requires colon to avoid matching "united", "unit size", "unit price"
+        self._unit_label_pattern = re.compile(
+            r'\bunit\s*:\s*([A-Za-z]{1,4})\b', re.IGNORECASE
+        )
+        # Pattern: price followed immediately by a short abbreviation on the same line
+        # e.g. "$ 80.00 EA" — the primary GSA Advantage display format
+        self._unit_price_inline_pattern = re.compile(
+            r'\$\s*[\d,]+\.?\d*\s+([A-Za-z]{2,4})\b'
+        )
 
     def setup_driver(self):
         """Initialize Chrome driver with optimized options for speed"""
@@ -285,7 +297,7 @@ class GSAScrapingAutomation:
 
             # Wait for page load
             try:
-                WebDriverWait(self.driver, 15).until(
+                WebDriverWait(self.driver, 8).until(
                     lambda d: d.execute_script("return document.readyState") == "complete"
                 )
             except TimeoutException:
@@ -309,7 +321,7 @@ class GSAScrapingAutomation:
                 return False
 
             try:
-                WebDriverWait(self.driver, 10).until(any_product_present)
+                WebDriverWait(self.driver, 5).until(any_product_present)
             except TimeoutException:
                 logger.warning("No product elements found within 10 seconds")
 
@@ -473,13 +485,52 @@ class GSAScrapingAutomation:
         return None
 
     def _extract_unit(self, text):
-        """Extract unit of measure from product text"""
-        for pattern in self._unit_patterns:
-            matches = pattern.findall(text)
-            if matches:
-                unit = matches[0].strip().upper()
-                if unit and len(unit) <= 5:
+        """Extract unit of measure from product text.
+
+        Strategy: find the line that contains the price, then extract the
+        abbreviation that immediately follows the price on that same line.
+        GSA Advantage consistently shows prices as "$ 80.00 EA" where the
+        unit is the only token after the price on that line.  Fall back to
+        labeled UOM/unit fields if no price line is found.
+        """
+        price_present = re.compile(r'\$\s*[\d,]+\.?\d*')
+
+        # --- Step 1: scan line-by-line for the price line ---
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or not price_present.search(line):
+                continue
+
+            # Try "$ 80.00 EA" — unit directly after the price
+            m = self._unit_price_inline_pattern.search(line)
+            if m:
+                unit = m.group(1).upper()
+                # Accept 2-4 char abbreviations; reject if the whole line after
+                # the price is just a continuation of a longer word (word
+                # boundary already guaranteed by the pattern)
+                if 2 <= len(unit) <= 4:
                     return unit
+
+            # Try "$80.00/EA" — slash-separated unit
+            m = self._unit_slash_pattern.search(line)
+            if m:
+                unit = m.group(1).upper()
+                if 1 <= len(unit) <= 4:
+                    return unit
+
+        # --- Step 2: labeled UOM/unit fields anywhere in the text ---
+        m = self._unit_uom_pattern.search(text)
+        if m:
+            unit = m.group(1).upper()
+            if 1 <= len(unit) <= 4:
+                return unit
+
+        m = self._unit_label_pattern.search(text)
+        if m:
+            unit = m.group(1).upper()
+            if 1 <= len(unit) <= 4:
+                return unit
+
         return None
 
     def _extract_contractor(self, text):
@@ -636,7 +687,7 @@ class GSAScrapingAutomation:
                     else:
                         print(f"  WARNING: No matches found ({time.time()-t0:.1f}s)")
 
-                    time.sleep(2)
+                    time.sleep(1)
 
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
@@ -698,7 +749,7 @@ class GSAScrapingAutomation:
                         self.save_results_to_excel(df)
                         print(f"  Progress saved at row {i + 1}")
 
-                    time.sleep(2)
+                    time.sleep(1)
 
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
@@ -770,7 +821,7 @@ class GSAScrapingAutomation:
                         self.save_results_to_excel(df)
                         print(f"  Progress saved at row {i + 1}")
 
-                    time.sleep(2)
+                    time.sleep(1)
 
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
@@ -847,7 +898,7 @@ class GSAScrapingAutomation:
                         self.save_results_to_excel(df)
                         print(f"  Progress saved at row {i + 1}")
 
-                    time.sleep(2)
+                    time.sleep(1)
 
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
