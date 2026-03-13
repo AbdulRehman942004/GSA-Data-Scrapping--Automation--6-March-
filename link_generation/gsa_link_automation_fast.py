@@ -19,6 +19,7 @@ class GSALink(SQLModel, table=True):
     part_number: str = Field(primary_key=True)
     gsa_link: str = Field()
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    is_scraped: bool = Field(default=False)
 
 class GSALinkAutomationFast:
     def __init__(self, excel_file_path):

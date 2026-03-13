@@ -12,6 +12,29 @@ from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from difflib import SequenceMatcher
 import logging
+from sqlmodel import Field, Session, SQLModel, create_engine, select
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class GSALink(SQLModel, table=True):
+    __tablename__ = 'gsa_links'
+    part_number: str = Field(primary_key=True)
+    gsa_link: str = Field()
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    is_scraped: bool = Field(default=False)
+
+class GSAScrapedData(SQLModel, table=True):
+    __tablename__ = 'gsa_scraped_data'
+    id: int = Field(default=None, primary_key=True)
+    part_number: str = Field(index=True)
+    gsa_low_price_1: float = Field(default=None)
+    unit_1: str = Field(default=None)
+    contractor_1: str = Field(default=None)
+    gsa_low_price_2: float = Field(default=None)
+    unit_2: str = Field(default=None)
+    contractor_2: str = Field(default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,7 +44,7 @@ logger = logging.getLogger(__name__)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 
-EXCEL_FILE = os.path.join(PROJECT_DIR, "link_generation", "GSA Advantage Low price_with_gsa_links.xlsx")
+EXCEL_FILE = os.path.join(PROJECT_DIR, "new_requirements", "GSA Advantage Low price.xlsx")
 MFR_MAPPING_FILE = os.path.join(PROJECT_DIR, "manufacturer_normalization", "convert_to_root", "original_to_root.csv")
 
 
@@ -37,6 +60,27 @@ class GSAScrapingAutomation:
 
         # Pre-compile regex patterns for better performance
         self._compile_regex_patterns()
+        
+        self.engine = None
+        self._setup_db()
+
+    def _setup_db(self):
+        """Initialize database connection"""
+        try:
+            host = os.getenv("POSTGRESQL_HOST", "localhost")
+            port = os.getenv("POSTGRESQL_PORT", "5432")
+            database = os.getenv("POSTGRESQL_DATABASE", "gsa_data")
+            username = os.getenv("POSTGRESQL_USERNAME", "postgres")
+            password = os.getenv("POSTGRESQL_PASSWORD", "12345")
+            
+            db_url = f"postgresql://{username}:{password}@{host}:{port}/{database}"
+            self.engine = create_engine(db_url)
+            
+            SQLModel.metadata.create_all(self.engine)
+            logger.info("Database connection setup successfully.")
+        except Exception as e:
+            logger.error(f"Failed to setup database: {str(e)}")
+            self.engine = None
 
     def _compile_regex_patterns(self):
         """Pre-compile regex patterns for better performance"""
@@ -251,14 +295,12 @@ class GSAScrapingAutomation:
             logger.info(f"Excel file loaded. Columns: {list(df.columns)}")
 
             # Find required columns
-            column_mapping = {'manufacturer': None, 'links': None, 'part_number': None}
+            column_mapping = {'manufacturer': None, 'part_number': None}
 
             for col in df.columns:
                 col_lower = col.strip().lower()
                 if col_lower == 'manufacturer':
                     column_mapping['manufacturer'] = col
-                elif col_lower == 'links':
-                    column_mapping['links'] = col
                 elif col_lower == 'part_number':
                     column_mapping['part_number'] = col
 
@@ -557,94 +599,59 @@ class GSAScrapingAutomation:
                 return re.sub(r'\s+', ' ', value)
         return None
 
-    def update_dataframe_with_results(self, df, row_idx, products_data):
-        """Update dataframe with scraped product information (top 2)"""
+    def save_results_to_db(self, part_number, products_data):
+        """Save scraped results to PostgreSQL DB via SQLModel"""
         try:
-            for i, product in enumerate(products_data[:2]):
-                if i == 0:
-                    df.at[row_idx, '1 GSA Low Price'] = product.get('price', '')
-                    df.at[row_idx, 'Unit'] = product.get('unit', '')
-                    df.at[row_idx, 'Contractor:Name'] = product.get('contractor', '')
-                elif i == 1:
-                    df.at[row_idx, '2 GSA Low Price'] = product.get('price', '')
-                    df.at[row_idx, 'Unit.1'] = product.get('unit', '')
-                    df.at[row_idx, 'Contractor:Name.1'] = product.get('contractor', '')
-
-            logger.info(f"Updated row {row_idx} with {len(products_data)} products")
-
-        except Exception as e:
-            logger.error(f"Error updating dataframe row {row_idx}: {str(e)}")
-
-    def create_backup(self, file_path):
-        """Create a timestamped backup of the file"""
-        try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = f"{file_path}.backup_{timestamp}"
-            shutil.copy2(file_path, backup_path)
-            logger.info(f"Backup created: {backup_path}")
-            return backup_path
-        except Exception as e:
-            logger.error(f"Error creating backup: {str(e)}")
-            return None
-
-    def save_results_to_excel(self, df):
-        """Update ONLY the 6 output columns in the existing workbook.
-        All other columns (including Links) are left completely untouched."""
-        from openpyxl import load_workbook
-
-        output_cols = [
-            '1 GSA Low Price', 'Unit', 'Contractor:Name',
-            '2 GSA Low Price', 'Unit.1', 'Contractor:Name.1'
-        ]
-
-        try:
-            if os.path.exists(self.excel_file_path):
-                self.create_backup(self.excel_file_path)
-
-            # Load the existing workbook — preserves Links and all other columns
-            wb = load_workbook(self.excel_file_path)
-            ws = wb.active
-
-            # Build header → column-index map (1-based)
-            header_map = {cell.value: cell.column for cell in ws[1] if cell.value}
-
-            # Only update columns that actually exist in the sheet
-            cols_to_update = {col: header_map[col] for col in output_cols if col in header_map}
-
-            if not cols_to_update:
-                logger.error("None of the output columns found in workbook headers")
-                return False
-
-            # Write scraped values only to output cells; everything else is untouched
-            for df_idx in df.index:
-                excel_row = df_idx + 2  # row 1 = header, so df row 0 → Excel row 2
-                for col_name, col_idx in cols_to_update.items():
-                    value = df.at[df_idx, col_name]
-                    if pd.notna(value) and str(value).strip() not in ('', 'nan'):
-                        ws.cell(row=excel_row, column=col_idx, value=value)
-
-            wb.save(self.excel_file_path)
-            logger.info(f"Results saved to {self.excel_file_path} (Links column preserved)")
+            val_1 = products_data[0] if len(products_data) > 0 else {}
+            val_2 = products_data[1] if len(products_data) > 1 else {}
+            
+            with Session(self.engine) as session:
+                # Check if it already exists to upsert
+                statement = select(GSAScrapedData).where(GSAScrapedData.part_number == str(part_number))
+                rec = session.exec(statement).first()
+                
+                if rec:
+                    rec.gsa_low_price_1 = val_1.get('price')
+                    rec.unit_1 = val_1.get('unit')
+                    rec.contractor_1 = val_1.get('contractor')
+                    rec.gsa_low_price_2 = val_2.get('price')
+                    rec.unit_2 = val_2.get('unit')
+                    rec.contractor_2 = val_2.get('contractor')
+                    rec.created_at = datetime.utcnow()
+                else:
+                    rec = GSAScrapedData(
+                        part_number=str(part_number),
+                        gsa_low_price_1=val_1.get('price'),
+                        unit_1=val_1.get('unit'),
+                        contractor_1=val_1.get('contractor'),
+                        gsa_low_price_2=val_2.get('price'),
+                        unit_2=val_2.get('unit'),
+                        contractor_2=val_2.get('contractor')
+                    )
+                    session.add(rec)
+                    
+                session.commit()
+            
+            logger.info(f"Saved {len(products_data)} products to DB for {part_number}")
             return True
-
         except Exception as e:
-            logger.error(f"Error saving results to Excel: {str(e)}")
+            logger.error(f"Error saving to DB for {part_number}: {str(e)}")
             return False
 
     def identify_missing_rows(self, df):
         """Identify rows where GSA scraped data is missing"""
-        output_cols = [
-            '1 GSA Low Price', 'Unit', 'Contractor:Name',
-            '2 GSA Low Price', 'Unit.1', 'Contractor:Name.1'
-        ]
         missing_rows = []
         for i, row in df.iterrows():
-            all_empty = all(
-                pd.isna(row.get(col, '')) or str(row.get(col, '')).strip() in ('', 'nan')
-                for col in output_cols if col in df.columns
-            )
-            if all_empty:
-                missing_rows.append(i)
+            part_number = row.get('Part Number') or row.get('part_number', '')
+            if not part_number:
+                continue
+                
+            with Session(self.engine) as session:
+                statement = select(GSAScrapedData).where(GSAScrapedData.part_number == str(part_number))
+                rec = session.exec(statement).first()
+                if not rec:
+                    missing_rows.append(i)
+                    
         return missing_rows
 
     # ─────────────────────────────────────────────────────────────────
@@ -667,14 +674,23 @@ class GSAScrapingAutomation:
 
             for i, row in df.head(test_count).iterrows():
                 try:
-                    gsa_url = row[column_mapping['links']]
                     manufacturer = row[column_mapping['manufacturer']]
                     part_number = row[column_mapping['part_number']]
 
-                    if pd.isna(gsa_url) or not str(gsa_url).strip():
-                        logger.warning(f"Row {i + 1}: No GSA URL for {part_number}")
+                    # Fetch link and flag from DB
+                    with Session(self.engine) as session:
+                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
+                        link_record = session.exec(statement).first()
+
+                    if not link_record or not link_record.gsa_link:
+                        logger.warning(f"Row {i + 1}: No DB URL for {part_number}")
+                        continue
+                        
+                    if link_record.is_scraped:
+                        logger.info(f"Row {i + 1}: Skipping {part_number} (already scraped)")
                         continue
 
+                    gsa_url = link_record.gsa_link
                     print(f"\nTest {i + 1}/{test_count} - {part_number} | Mfr: {manufacturer}")
                     t0 = time.time()
 
@@ -682,17 +698,25 @@ class GSAScrapingAutomation:
 
                     if products_data:
                         successful += 1
-                        self.update_dataframe_with_results(df, i, products_data)
+                        self.save_results_to_db(part_number, products_data)
                         print(f"  SUCCESS: {len(products_data)} products ({time.time()-t0:.1f}s)")
                     else:
                         print(f"  WARNING: No matches found ({time.time()-t0:.1f}s)")
+
+                    # Mark as scraped in DB
+                    with Session(self.engine) as session:
+                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
+                        rec = session.exec(statement).first()
+                        if rec:
+                            rec.is_scraped = True
+                            session.add(rec)
+                            session.commit()
 
                     time.sleep(1)
 
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
 
-            self.save_results_to_excel(df)
             print(f"\nTest complete. {successful}/{test_count} successful in {time.time()-start_time:.1f}s")
             return True
 
@@ -719,13 +743,23 @@ class GSAScrapingAutomation:
 
             for i, row in df.iterrows():
                 try:
-                    gsa_url = row[column_mapping['links']]
                     manufacturer = row[column_mapping['manufacturer']]
                     part_number = row[column_mapping['part_number']]
 
-                    if pd.isna(gsa_url) or not str(gsa_url).strip():
-                        logger.warning(f"Row {i + 1}: No URL for {part_number}")
+                    # Fetch link from DB
+                    with Session(self.engine) as session:
+                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
+                        link_record = session.exec(statement).first()
+
+                    if not link_record or not link_record.gsa_link:
+                        logger.warning(f"Row {i + 1}: No URL in DB for {part_number}")
                         continue
+                        
+                    if link_record.is_scraped:
+                        logger.info(f"Row {i + 1}: Skipping {part_number} (already scraped)")
+                        continue
+                        
+                    gsa_url = link_record.gsa_link
 
                     print(f"\nProgress: {i + 1}/{len(df)} ({(i+1)/len(df)*100:.1f}%) - {part_number}")
                     t0 = time.time()
@@ -735,26 +769,28 @@ class GSAScrapingAutomation:
 
                     if products_data:
                         successful += 1
-                        self.update_dataframe_with_results(df, i, products_data)
+                        self.save_results_to_db(part_number, products_data)
                         print(f"  SUCCESS: {len(products_data)} products ({elapsed:.1f}s)")
                     else:
                         print(f"  WARNING: No matches ({elapsed:.1f}s)")
+                        
+                    # Mark as scraped in DB
+                    with Session(self.engine) as session:
+                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
+                        rec = session.exec(statement).first()
+                        if rec:
+                            rec.is_scraped = True
+                            session.add(rec)
+                            session.commit()
 
                     total_elapsed = time.time() - start_time
                     avg = total_elapsed / (i + 1)
                     eta_h = (len(df) - i - 1) * avg / 3600
                     print(f"  Avg: {avg:.1f}s/row | ETA: {eta_h:.1f}h")
 
-                    if (i + 1) % 100 == 0:
-                        self.save_results_to_excel(df)
-                        print(f"  Progress saved at row {i + 1}")
-
-                    time.sleep(1)
-
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
 
-            self.save_results_to_excel(df)
             total_time = time.time() - start_time
             print(f"\nDone! {successful}/{len(df)} successful in {total_time/60:.1f} min")
             return True
@@ -791,13 +827,22 @@ class GSAScrapingAutomation:
             for offset, i in enumerate(range(start_idx, end_idx + 1), 1):
                 try:
                     row = df.iloc[i]
-                    gsa_url = df.at[i, column_mapping['links']]
                     manufacturer = df.at[i, column_mapping['manufacturer']]
                     part_number = df.at[i, column_mapping['part_number']]
 
-                    if pd.isna(gsa_url) or not str(gsa_url).strip():
-                        logger.warning(f"Row {i + 1}: No URL for {part_number}")
+                    with Session(self.engine) as session:
+                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
+                        link_record = session.exec(statement).first()
+
+                    if not link_record or not link_record.gsa_link:
+                        logger.warning(f"Row {i + 1}: No URL in DB for {part_number}")
                         continue
+                        
+                    if link_record.is_scraped:
+                        logger.info(f"Row {i + 1}: Skipping {part_number} (already scraped)")
+                        continue
+
+                    gsa_url = link_record.gsa_link
 
                     print(f"\nProgress: {offset}/{total} (Row {i + 1}) - {part_number}")
                     t0 = time.time()
@@ -807,26 +852,27 @@ class GSAScrapingAutomation:
 
                     if products_data:
                         successful += 1
-                        self.update_dataframe_with_results(df, i, products_data)
+                        self.save_results_to_db(part_number, products_data)
                         print(f"  SUCCESS: {len(products_data)} products ({elapsed:.1f}s)")
                     else:
                         print(f"  WARNING: No matches ({elapsed:.1f}s)")
+                        
+                    with Session(self.engine) as session:
+                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
+                        rec = session.exec(statement).first()
+                        if rec:
+                            rec.is_scraped = True
+                            session.add(rec)
+                            session.commit()
 
                     total_elapsed = time.time() - start_time
                     avg = total_elapsed / offset
                     eta_h = (total - offset) * avg / 3600
                     print(f"  Avg: {avg:.1f}s/row | ETA: {eta_h:.1f}h")
 
-                    if offset % 100 == 0:
-                        self.save_results_to_excel(df)
-                        print(f"  Progress saved at row {i + 1}")
-
-                    time.sleep(1)
-
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
 
-            self.save_results_to_excel(df)
             total_time = time.time() - start_time
             print(f"\nDone! Rows {start_row}-{end_row}: {successful}/{total} successful in {total_time/60:.1f} min")
             return True
@@ -868,14 +914,24 @@ class GSAScrapingAutomation:
 
             for offset, i in enumerate(missing_rows, 1):
                 try:
-                    gsa_url = df.at[i, column_mapping['links']]
                     manufacturer = df.at[i, column_mapping['manufacturer']]
                     part_number = df.at[i, column_mapping['part_number']]
 
-                    if pd.isna(gsa_url) or not str(gsa_url).strip():
-                        logger.warning(f"Row {i + 1}: No URL for {part_number}")
+                    # Fetch link from DB
+                    with Session(self.engine) as session:
+                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
+                        link_record = session.exec(statement).first()
+
+                    if not link_record or not link_record.gsa_link:
+                        logger.warning(f"Row {i + 1}: No DB URL for {part_number}")
+                        continue
+                        
+                    if link_record.is_scraped:
+                        logger.info(f"Row {i + 1}: Skipping {part_number} (already scraped)")
                         continue
 
+                    gsa_url = link_record.gsa_link
+                    
                     print(f"\nMissing {offset}/{total} (Row {i + 1}) - {part_number}")
                     t0 = time.time()
 
@@ -884,26 +940,27 @@ class GSAScrapingAutomation:
 
                     if products_data:
                         successful += 1
-                        self.update_dataframe_with_results(df, i, products_data)
+                        self.save_results_to_db(part_number, products_data)
                         print(f"  SUCCESS: {len(products_data)} products ({elapsed:.1f}s)")
                     else:
                         print(f"  WARNING: No matches ({elapsed:.1f}s)")
+
+                    with Session(self.engine) as session:
+                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
+                        rec = session.exec(statement).first()
+                        if rec:
+                            rec.is_scraped = True
+                            session.add(rec)
+                            session.commit()
 
                     total_elapsed = time.time() - start_time
                     avg = total_elapsed / offset
                     eta_h = (total - offset) * avg / 3600
                     print(f"  Avg: {avg:.1f}s/row | ETA: {eta_h:.1f}h")
 
-                    if offset % 100 == 0:
-                        self.save_results_to_excel(df)
-                        print(f"  Progress saved at row {i + 1}")
-
-                    time.sleep(1)
-
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
 
-            self.save_results_to_excel(df)
             total_time = time.time() - start_time
             print(f"\nDone! {successful}/{total} missing rows filled in {total_time/60:.1f} min")
             return True
@@ -920,9 +977,9 @@ def main():
     print("\n" + "=" * 60)
     print("GSA SCRAPING AUTOMATION")
     print("=" * 60)
-    print(f"Input/Output: GSA Advantage Low price_with_gsa_links.xlsx")
+    print(f"Input:        GSA Advantage Low price.xlsx")
     print(f"Match by:     Manufacturer Name")
-    print(f"Fetch:        Price | Unit | Contractor (top 2 matches)")
+    print(f"Output:       PostgreSQL DB (gsa_scraped_data table)")
     print("=" * 60)
 
     automation = GSAScrapingAutomation(EXCEL_FILE, MFR_MAPPING_FILE)
