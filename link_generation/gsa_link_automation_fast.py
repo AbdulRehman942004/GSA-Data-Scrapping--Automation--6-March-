@@ -1,19 +1,51 @@
 import pandas as pd
 import time
 import os
+from dotenv import load_dotenv
 import shutil
 from datetime import datetime
 import logging
+from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+
+class GSALink(SQLModel, table=True):
+    __tablename__ = 'gsa_links'
+    part_number: str = Field(primary_key=True)
+    gsa_link: str = Field()
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class GSALinkAutomationFast:
     def __init__(self, excel_file_path):
         self.excel_file_path = excel_file_path
         self.base_url = "https://www.gsaadvantage.gov/advantage/ws/search/advantage_search"
         self.url_template = "?searchType=1&q=7:1{part_number}&s=6&c=25"
+        self._setup_db()
+        
+    def _setup_db(self):
+        """Initialize database connection"""
+        try:
+            host = os.getenv("POSTGRESQL_HOST", "localhost")
+            port = os.getenv("POSTGRESQL_PORT", "5432")
+            database = os.getenv("POSTGRESQL_DATABASE", "gsa_data")
+            username = os.getenv("POSTGRESQL_USERNAME", "postgres")
+            password = os.getenv("POSTGRESQL_PASSWORD", "12345")
+            
+            db_url = f"postgresql://{username}:{password}@{host}:{port}/{database}"
+            self.engine = create_engine(db_url)
+            
+            # Create table if it doesn't exist
+            SQLModel.metadata.create_all(self.engine)
+            
+            logger.info("Database connection setup successfully.")
+        except Exception as e:
+            logger.error(f"Failed to setup database: {str(e)}")
+            self.engine = None
 
     def read_excel_data(self):
         """Read Excel file and extract part_number column"""
@@ -147,7 +179,7 @@ class GSALinkAutomationFast:
                         return True
                 return False
             
-            logger.info(f"Results successfully saved to {output_file}")
+            logger.info(f"Results successfully saved to Excel ({output_file})")
             return True
             
         except Exception as e:
@@ -173,6 +205,29 @@ class GSALinkAutomationFast:
             except Exception as restore_error:
                 logger.error(f"Failed to restore from backup: {str(restore_error)}")
             
+            return False
+
+    def save_results_to_db(self, part_number, gsa_link):
+        """Save a single link to the database using an upsert or skip if None"""
+        if not self.engine or not gsa_link:
+            return False
+            
+        try:
+            with Session(self.engine) as session:
+                # Basic upsert (merge)
+                statement = select(GSALink).where(GSALink.part_number == part_number)
+                link_record = session.exec(statement).first()
+                if link_record:
+                    link_record.gsa_link = gsa_link
+                    link_record.created_at = datetime.utcnow()
+                else:
+                    link_record = GSALink(part_number=part_number, gsa_link=gsa_link)
+                    session.add(link_record)
+                
+                session.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error saving {part_number} to DB: {str(e)}")
             return False
     
     def cleanup_old_backups(self, keep_last=5):
@@ -216,6 +271,10 @@ class GSALinkAutomationFast:
                 if gsa_url:
                     # Update the dataframe with the link
                     df.at[i-1, 'Links'] = gsa_url
+                    
+                    # Save directly to Postgres
+                    self.save_results_to_db(part_number, gsa_url)
+                    
                     successful_links += 1
 
                     # Show progress every 1000 items or for first 10 items
@@ -231,17 +290,17 @@ class GSALinkAutomationFast:
                         logger.info(f"Processed {i}/{len(part_numbers)}: {part_number}")
 
                 # Save every 1000 items for safety
-                if i % 1000 == 0:
-                    save_success = self.save_results_to_excel(df)
-                    if not save_success:
-                        logger.error(f"Failed to save results at item {i}")
-                        print(f"ERROR: Failed to save Excel file at item {i}")
+                # if i % 1000 == 0:
+                #     save_success = self.save_results_to_excel(df)
+                #     if not save_success:
+                #         logger.error(f"Failed to save results at item {i}")
+                #         print(f"ERROR: Failed to save Excel file at item {i}")
 
-            # Final save
-            save_success = self.save_results_to_excel(df)
-            if not save_success:
-                logger.error("Failed to save final results")
-                return False
+            # Final save (Excel fallback)
+            # save_success = self.save_results_to_excel(df)
+            # if not save_success:
+            #     logger.error("Failed to save final results to Excel")
+            #     return False
 
             # Calculate final statistics
             total_time = time.time() - start_time
@@ -254,7 +313,7 @@ class GSALinkAutomationFast:
             logger.info(f"Processing rate: {rate:.1f} items/second")
             
             # Clean up old backup files
-            self.cleanup_old_backups()
+            # self.cleanup_old_backups()
             
             return True
             
@@ -287,24 +346,22 @@ class GSALinkAutomationFast:
                 if gsa_url:
                     # Update the dataframe with the link
                     df.at[i-1, 'Links'] = gsa_url
+                    
+                    # Save directly to Postgres
+                    self.save_results_to_db(stock_number, gsa_url)
+                    
                     successful_links += 1
-                    print(f"✅ {i}/{len(test_stock_numbers)} - {stock_number} -> {gsa_url}")
+                    print(f"[SUCCESS] {i}/{len(test_stock_numbers)} - {stock_number} -> {gsa_url}")
                     logger.info(f"Processed {i}/{len(test_stock_numbers)}: {stock_number}")
                 else:
-                    print(f"❌ {i}/{len(test_stock_numbers)} - {stock_number} -> Failed to construct URL")
+                    print(f"[FAILED] {i}/{len(test_stock_numbers)} - {stock_number} -> Failed to construct URL")
                     logger.error(f"Failed to construct URL for {stock_number}")
-            
-            # Save results
-            save_success = self.save_results_to_excel(df)
-            if not save_success:
-                logger.error("Failed to save test results")
-                return False
             
             # Calculate final statistics
             total_time = time.time() - start_time
             rate = len(test_stock_numbers) / total_time if total_time > 0 else 0
             
-            print(f"\n🎉 Test completed!")
+            print(f"\n[DONE] Test completed!")
             print(f"Processed: {len(test_stock_numbers)} stock numbers")
             print(f"Successful links: {successful_links}")
             print(f"Total time: {total_time:.2f} seconds")
@@ -352,6 +409,10 @@ class GSALinkAutomationFast:
                 if gsa_url:
                     # Update the dataframe with the link
                     df.at[actual_row-1, 'Links'] = gsa_url
+                    
+                    # Save directly to Postgres
+                    self.save_results_to_db(stock_number, gsa_url)
+                    
                     successful_links += 1
                     
                     # Show progress every 100 items or for first 10 items
@@ -366,21 +427,8 @@ class GSALinkAutomationFast:
                               f"Processing: {stock_number}")
                         logger.info(f"Processing {i}/{len(custom_stock_numbers)} (Row {actual_row}): {stock_number}")
                 else:
-                    print(f"❌ Row {actual_row} - {stock_number} -> Failed to construct URL")
+                    print(f"[FAILED] Row {actual_row} - {stock_number} -> Failed to construct URL")
                     logger.error(f"Failed to construct URL for {stock_number} (Row {actual_row})")
-                
-                # Save every 100 items for safety
-                if i % 100 == 0:
-                    save_success = self.save_results_to_excel(df)
-                    if not save_success:
-                        logger.error(f"Failed to save results at item {i}")
-                        print(f"ERROR: Failed to save Excel file at item {i}")
-            
-            # Final save
-            save_success = self.save_results_to_excel(df)
-            if not save_success:
-                logger.error("Failed to save final results")
-                return False
             
             # Calculate final statistics
             total_time = time.time() - start_time
@@ -391,9 +439,6 @@ class GSALinkAutomationFast:
             logger.info(f"Successful links: {successful_links}")
             logger.info(f"Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
             logger.info(f"Processing rate: {rate:.1f} items/second")
-            
-            # Clean up old backup files
-            self.cleanup_old_backups()
             
             return True
             
@@ -411,7 +456,7 @@ def main():
         print("GSA LINK AUTOMATION - SUPER FAST VERSION")
         print("="*60)
         print("Input:  GSA Advantage Low price.xlsx")
-        print("Output: GSA Advantage Low price_with_gsa_links.xlsx")
+        print("Output: PostgreSQL DB (gsa_links table)")
         print("="*60)
         print("Choose automation mode:")
         print("1. Test mode (first 5 stock numbers)")
@@ -428,11 +473,11 @@ def main():
             automation = GSALinkAutomationFast(excel_file)
             
             if choice == '1':
-                print("\n🧪 Running test mode with first 5 stock numbers...")
+                print("\n[TEST] Running test mode with first 5 stock numbers...")
                 success = automation.run_automation_fast_test_mode(5)
             elif choice == '2':
-                print("\n🚀 Running SUPER FAST full automation with all part numbers...")
-                print("⚡ This will process all 18,264 items in approximately 30 minutes!")
+                print("\n[FULL] Running SUPER FAST full automation with all part numbers...")
+                print("[INFO] This will process all 18,264 items in approximately 30 minutes!")
                 confirm = input("Are you sure you want to proceed? (y/n): ").strip().lower()
                 if confirm in ['y', 'yes']:
                     success = automation.run_automation_fast()
@@ -448,17 +493,17 @@ def main():
                         print("ERROR: Invalid range. Start row must be >= 1 and end row must be >= start row.")
                         continue
                     
-                    print(f"\n🚀 Running SUPER FAST custom range automation for rows {start_row}-{end_row}...")
+                    print(f"\n[RANGE] Running SUPER FAST custom range automation for rows {start_row}-{end_row}...")
                     success = automation.run_automation_fast_custom_range(start_row, end_row)
                 except ValueError:
                     print("ERROR: Please enter valid numbers for the range.")
                     continue
             
             if success:
-                print("\n✅ Super-fast automation completed successfully!")
-                print("🎉 All links generated using direct URL construction!")
+                print("\n[SUCCESS] Super-fast automation completed successfully!")
+                print("[SUCCESS] All links generated using direct URL construction!")
             else:
-                print("\n❌ Automation failed. Check the logs for details.")
+                print("\n[ERROR] Automation failed. Check the logs for details.")
             
             # Ask if user wants to run another automation
             continue_choice = input("\nDo you want to run another automation? (y/n): ").strip().lower()
@@ -466,7 +511,7 @@ def main():
                 print("Goodbye! Exiting the program...")
                 break
         else:
-            print("❌ Invalid choice. Please enter 1, 2, 3, or 4.")
+            print("[ERROR] Invalid choice. Please enter 1, 2, 3, or 4.")
 
 if __name__ == "__main__":
     main()
