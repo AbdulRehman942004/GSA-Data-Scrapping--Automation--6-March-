@@ -687,7 +687,7 @@ class GSAScrapingAutomation:
                     else:
                         print(f"  WARNING: No matches found ({time.time()-t0:.1f}s)")
 
-                    time.sleep(1)
+                    time.sleep(6)
 
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
@@ -749,7 +749,7 @@ class GSAScrapingAutomation:
                         self.save_results_to_excel(df)
                         print(f"  Progress saved at row {i + 1}")
 
-                    time.sleep(1)
+                    time.sleep(6)
 
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
@@ -821,7 +821,7 @@ class GSAScrapingAutomation:
                         self.save_results_to_excel(df)
                         print(f"  Progress saved at row {i + 1}")
 
-                    time.sleep(1)
+                    time.sleep(6)
 
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
@@ -898,7 +898,7 @@ class GSAScrapingAutomation:
                         self.save_results_to_excel(df)
                         print(f"  Progress saved at row {i + 1}")
 
-                    time.sleep(1)
+                    time.sleep(6)
 
                 except Exception as e:
                     logger.error(f"Error on row {i + 1}: {str(e)}")
