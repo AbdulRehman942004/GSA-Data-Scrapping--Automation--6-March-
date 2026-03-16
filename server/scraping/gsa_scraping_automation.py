@@ -315,8 +315,19 @@ class GSAScrapingAutomation:
         """Scrape GSA page and return top 2 products matching the manufacturer"""
         try:
             if not self.driver:
-                logger.error("Driver is not initialized!")
-                return []
+                logger.warning("Driver is not initialized. Setting up driver...")
+                self.setup_driver()
+
+            # Health check: gracefully recover if the browser was closed or crashed
+            try:
+                _ = self.driver.title
+            except Exception:
+                logger.warning("WebDriver is detached or crashed. Re-initializing...")
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+                self.setup_driver()
 
             logger.info(f"Scraping: {gsa_url}")
             self.driver.get(gsa_url)
