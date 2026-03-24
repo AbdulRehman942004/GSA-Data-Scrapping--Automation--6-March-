@@ -3,7 +3,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 import state
 from services.scraping_service import GSAScrapingAutomation
-from settings import EXCEL_FILE_PATH, MFR_MAPPING_FILE_PATH
+from settings import EXCEL_FILE_PATH
 from models.requests import ScrapingRequest
 
 router = APIRouter(prefix="/api/scrape", tags=["Scraping"])
@@ -24,7 +24,7 @@ def _validate_range(start_row: int, end_row: int) -> None:
 def _run_scraping(req: ScrapingRequest) -> None:
     """Background task: runs scraping and resets state when done."""
     try:
-        automation = GSAScrapingAutomation(EXCEL_FILE_PATH, MFR_MAPPING_FILE_PATH)
+        automation = GSAScrapingAutomation(EXCEL_FILE_PATH)
         state.active_scraping_automation = automation
 
         if req.mode == "test":

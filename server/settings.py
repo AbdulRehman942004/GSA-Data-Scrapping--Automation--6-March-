@@ -29,9 +29,6 @@ ALLOWED_ORIGINS = [
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 
 EXCEL_FILE_PATH = os.path.join(SERVER_DIR, "data", "GSA Advantage Low price.xlsx")
-MFR_MAPPING_FILE_PATH = os.path.join(
-    SERVER_DIR, "manufacturer_normalization", "convert_to_root", "original_to_root.csv"
-)
 
 # ── Scraping timing ───────────────────────────────────────────────────────────
 SCRAPE_DELAY_SECONDS: int = int(os.getenv("SCRAPE_DELAY_SECONDS", "6"))

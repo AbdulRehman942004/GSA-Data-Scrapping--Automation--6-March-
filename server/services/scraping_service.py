@@ -21,25 +21,19 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.models import GSALink, GSAScrapedData
 from database.db import get_engine
 from database.repository import get_link_by_part_number, mark_link_scraped, upsert_scraped_data
-from settings import SCRAPE_DELAY_SECONDS, PAGE_LOAD_TIMEOUT, EXCEL_FILE_PATH, MFR_MAPPING_FILE_PATH
+from settings import SCRAPE_DELAY_SECONDS, PAGE_LOAD_TIMEOUT, EXCEL_FILE_PATH
 from services.manufacturer_normalizer import ManufacturerNormalizer
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Resolve paths relative to this script's location
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
-
-EXCEL_FILE = EXCEL_FILE_PATH        # kept for CLI main() backward compat
-MFR_MAPPING_FILE = MFR_MAPPING_FILE_PATH
+EXCEL_FILE = EXCEL_FILE_PATH
 
 
 class GSAScrapingAutomation:
-    def __init__(self, excel_file_path, manufacturer_mapping_file):
+    def __init__(self, excel_file_path):
         self.excel_file_path = excel_file_path
-        self.manufacturer_mapping_file = manufacturer_mapping_file
         self.driver = None
         self.wait = None
         self._normalizer = ManufacturerNormalizer()
@@ -149,18 +143,6 @@ class GSAScrapingAutomation:
         self.driver = webdriver.Chrome(options=chrome_options)
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         self.wait = WebDriverWait(self.driver, PAGE_LOAD_TIMEOUT)
-
-    def load_manufacturer_mapping(self):
-        """Load manufacturer root-form mapping from CSV into the normalizer."""
-        try:
-            df_mapping = pd.read_csv(self.manufacturer_mapping_file)
-            mapping = dict(zip(df_mapping['original'], df_mapping['root']))
-            self._normalizer.load_mapping(mapping)
-            logger.info(f"Loaded {len(mapping)} manufacturer mappings")
-            return True
-        except Exception as e:
-            logger.error(f"Error loading manufacturer mapping: {str(e)}")
-            return False
 
     def fuzzy_match_manufacturer(self, original_manufacturer, website_manufacturer, threshold=0.85):
         """Delegate manufacturer matching to ManufacturerNormalizer."""
@@ -578,8 +560,6 @@ class GSAScrapingAutomation:
     def run_scraping_test_mode(self, item_limit=3):
         """Test with the first N rows."""
         try:
-            if not self.load_manufacturer_mapping():
-                return False
             df, column_mapping = self.read_excel_data()
             if df is None:
                 return False
@@ -597,8 +577,6 @@ class GSAScrapingAutomation:
     def run_scraping_full(self):
         """Full automation - process all rows."""
         try:
-            if not self.load_manufacturer_mapping():
-                return False
             df, column_mapping = self.read_excel_data()
             if df is None:
                 return False
@@ -615,8 +593,6 @@ class GSAScrapingAutomation:
     def run_scraping_custom_range(self, start_row: int, end_row: int):
         """Process a specific row range (1-based, inclusive)."""
         try:
-            if not self.load_manufacturer_mapping():
-                return False
             df, column_mapping = self.read_excel_data()
             if df is None:
                 return False
@@ -643,8 +619,6 @@ class GSAScrapingAutomation:
                         When called from the CLI the caller supplies this after prompting the user.
         """
         try:
-            if not self.load_manufacturer_mapping():
-                return False
             df, column_mapping = self.read_excel_data()
             if df is None:
                 return False
