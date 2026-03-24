@@ -3,6 +3,7 @@ import time
 import re
 import os
 import shutil
+import random
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -10,50 +11,60 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from difflib import SequenceMatcher
 from dotenv import load_dotenv
 import sys
 import logging
 import yaml
-from sqlmodel import Field, Session, SQLModel, create_engine, select
+from sqlmodel import Session, SQLModel, select
 
 # Ensure the root project dir is in sys.path so we can import models.py
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.models import GSALink, GSAScrapedData
 from database.db import get_engine
+from database.repository import get_link_by_part_number, mark_link_scraped, upsert_scraped_data
+from settings import SCRAPE_DELAY_SECONDS, PAGE_LOAD_TIMEOUT, EXCEL_FILE_PATH
+from services.manufacturer_normalizer import ManufacturerNormalizer
+from services.proxy_auth import create_proxy_auth_extension
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Resolve paths relative to this script's location
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
-
-EXCEL_FILE = os.path.join(PROJECT_DIR, "new_requirements", "GSA Advantage Low price.xlsx")
-MFR_MAPPING_FILE = os.path.join(PROJECT_DIR, "manufacturer_normalization", "convert_to_root", "original_to_root.csv")
+EXCEL_FILE = EXCEL_FILE_PATH
 
 
 class GSAScrapingAutomation:
-    def __init__(self, excel_file_path, manufacturer_mapping_file):
+    def __init__(self, excel_file_path, stop_event=None, rate_limiter=None,
+                 on_row_complete=None, worker_id=None, proxy=None, proxies=None):
         self.excel_file_path = excel_file_path
-        self.manufacturer_mapping_file = manufacturer_mapping_file
         self.driver = None
         self.wait = None
-        self.manufacturer_mapping = {}
-        # Add caching for performance
-        self._manufacturer_normalization_cache = {}
-
-        # Pre-compile regex patterns for better performance
+        self._normalizer = ManufacturerNormalizer()
         self._compile_regex_patterns()
-        
         self.engine = None
         self._setup_db()
-        self.stop_requested = False
+        # Parallel-aware stop: shared threading.Event or fallback to boolean
+        self._stop_event = stop_event
+        self._stop_flag = False
+        self._rate_limiter = rate_limiter
+        self._on_row_complete = on_row_complete
+        self._worker_id = worker_id
+        self._proxy = proxy  # {"host", "port", "user", "pass"} or None
+        self._proxies = proxies
+        self._proxy_ext_path = None  # temp file cleanup
+
+    @property
+    def stop_requested(self):
+        if self._stop_event is not None:
+            return self._stop_event.is_set()
+        return self._stop_flag
 
     def stop(self):
         """Signal the automation to stop as soon as possible"""
-        self.stop_requested = True
+        if self._stop_event is not None:
+            self._stop_event.set()
+        else:
+            self._stop_flag = True
         logger.info("Stop signal received. Finishing current task...")
 
     def _setup_db(self):
@@ -119,10 +130,21 @@ class GSAScrapingAutomation:
     def setup_driver(self):
         """Initialize Chrome driver with optimized options for speed"""
         chrome_options = Options()
+
+        # User-Agent rotation for stealth
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/122.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:123.0) Gecko/20100101 Firefox/123.0"
+        ]
+        chosen_ua = random.choice(user_agents)
+        chrome_options.add_argument(f"user-agent={chosen_ua}")
+        
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument("--disable-extensions")
         chrome_options.add_argument("--disable-plugins")
         chrome_options.add_argument("--disable-images")
         chrome_options.add_argument("--disable-web-security")
@@ -149,128 +171,38 @@ class GSAScrapingAutomation:
             }
         })
 
+        # Proxy configuration
+        active_proxy = None
+        if self._proxies:
+            active_proxy = random.choice(self._proxies)
+        elif self._proxy:
+            active_proxy = self._proxy
+
+        if active_proxy:
+            proxy = active_proxy
+            if proxy.get("user"):
+                # Authenticated proxy → needs Chrome extension
+                # NOTE: --disable-extensions must NOT be set for this to work
+                self._proxy_ext_path = create_proxy_auth_extension(
+                    proxy["host"], proxy["port"], proxy["user"], proxy["pass"]
+                )
+                chrome_options.add_extension(self._proxy_ext_path)
+                logger.info(f"[W{self._worker_id}] Using proxy: {proxy['host']}:{proxy['port']} (authenticated)")
+            else:
+                # Unauthenticated proxy → simple flag
+                chrome_options.add_argument("--disable-extensions")
+                chrome_options.add_argument(f"--proxy-server=http://{proxy['host']}:{proxy['port']}")
+                logger.info(f"[W{self._worker_id}] Using proxy: {proxy['host']}:{proxy['port']}")
+        else:
+            chrome_options.add_argument("--disable-extensions")
+
         self.driver = webdriver.Chrome(options=chrome_options)
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        self.wait = WebDriverWait(self.driver, 15)
-
-    def load_manufacturer_mapping(self):
-        """Load manufacturer root form mapping from CSV"""
-        try:
-            df_mapping = pd.read_csv(self.manufacturer_mapping_file)
-            self.manufacturer_mapping = dict(zip(df_mapping['original'], df_mapping['root']))
-
-            # Build a normalized-key mapping to handle punctuation/symbol variants
-            self._normalized_manufacturer_lookup = {}
-            for original, root in zip(df_mapping['original'], df_mapping['root']):
-                norm_key = self.normalize_manufacturer(str(original))
-                if norm_key:
-                    self._normalized_manufacturer_lookup[norm_key] = root
-
-            logger.info(f"Loaded {len(self.manufacturer_mapping)} manufacturer mappings")
-            return True
-        except Exception as e:
-            logger.error(f"Error loading manufacturer mapping: {str(e)}")
-            return False
-
-    def normalize_manufacturer(self, manufacturer_name):
-        """Normalize manufacturer name using root form logic with caching"""
-        if not manufacturer_name:
-            return ""
-
-        if manufacturer_name in self._manufacturer_normalization_cache:
-            return self._manufacturer_normalization_cache[manufacturer_name]
-
-        result = self._normalize_to_root_like(manufacturer_name)
-        self._manufacturer_normalization_cache[manufacturer_name] = result
-        return result
-
-    def _normalize_to_root_like(self, name):
-        """Convert manufacturer name to root-like form (same logic as Step 2)"""
-        if not name:
-            return ""
-
-        REMOVABLE_TERMS = {
-            "inc", "incorporated", "corp", "corporation", "co", "company", "llc", "l.l.c",
-            "ltd", "limited", "gmbh", "s.a.", "s.a", "s.p.a.", "spa", "ag", "kg", "nv",
-            "plc", "pty", "pte", "sro", "s.r.o", "srl", "lp", "llp", "pc",
-            "products", "product", "brands", "brand", "group", "international", "industries",
-            "industry", "mfg", "manufacturing", "manufacturers", "division", "div",
-            "usa", "u.s.a", "u.s.", "us", "america", "american", "north", "south",
-            "europe", "european", "asia", "pacific",
-        }
-
-        lower = name.lower()
-        tokens = re.sub(r"[^0-9a-z]+", " ", lower).split()
-
-        filtered = [t for t in tokens if t not in REMOVABLE_TERMS]
-
-        if filtered:
-            chosen = filtered[0]
-        else:
-            alnum_runs = re.findall(r"[0-9a-z]+", lower)
-            chosen = alnum_runs[0] if alnum_runs else ""
-
-        return re.sub(r"[^0-9a-z]", "", chosen)
+        self.wait = WebDriverWait(self.driver, PAGE_LOAD_TIMEOUT)
 
     def fuzzy_match_manufacturer(self, original_manufacturer, website_manufacturer, threshold=0.85):
-        """Match manufacturer name using CSV mapping + normalization + fuzzy logic"""
-        if not original_manufacturer or not website_manufacturer:
-            return False
-
-        # Strategy 1: CSV mapping - most reliable
-        root_form = self.manufacturer_mapping.get(original_manufacturer)
-        if root_form:
-            website_alnum = re.sub(r"[^a-z0-9]", "", str(website_manufacturer).lower())
-            if website_alnum and root_form in website_alnum:
-                return True
-
-            norm_website = self.normalize_manufacturer(website_manufacturer)
-            if norm_website:
-                if root_form in norm_website:
-                    return True
-                sim_root = SequenceMatcher(None, root_form, norm_website).ratio()
-                if sim_root >= threshold:
-                    return True
-
-            # Containment check after stripping common suffixes
-            original_clean = re.sub(
-                r'\s+(inc|incorporated|corp|corporation|co|company|llc|ltd|limited|products|product|brands|brand)$',
-                '', original_manufacturer.lower()
-            )
-            original_normalized = re.sub(r'[-\s]+', ' ', original_clean)
-            website_normalized = re.sub(r'[-\s]+', ' ', website_manufacturer.lower())
-            if original_normalized in website_normalized:
-                return True
-
-        # Strategy 2: Normalized-key mapping
-        if not root_form:
-            norm_key = self.normalize_manufacturer(original_manufacturer)
-            if hasattr(self, '_normalized_manufacturer_lookup'):
-                root_form = self._normalized_manufacturer_lookup.get(norm_key)
-                if root_form:
-                    website_alnum = re.sub(r"[^a-z0-9]", "", str(website_manufacturer).lower())
-                    if website_alnum and root_form in website_alnum:
-                        return True
-                    norm_website = self.normalize_manufacturer(website_manufacturer)
-                    if norm_website and root_form in norm_website:
-                        return True
-
-        # Strategy 3: Direct normalization comparison (fallback)
-        norm_original = self.normalize_manufacturer(original_manufacturer)
-        norm_website = self.normalize_manufacturer(website_manufacturer)
-
-        if norm_original and norm_website:
-            if len(norm_original) >= 3 and len(norm_website) >= 3:
-                if norm_original in norm_website or norm_website in norm_original:
-                    return True
-
-            sim_direct = SequenceMatcher(None, norm_original, norm_website).ratio()
-            required_threshold = threshold if len(norm_original) >= 4 and len(norm_website) >= 4 else 0.95
-            if not (norm_original == norm_website and len(norm_original) <= 2):
-                if sim_direct >= required_threshold:
-                    return True
-
-        return False
+        """Delegate manufacturer matching to ManufacturerNormalizer."""
+        return self._normalizer.matches(original_manufacturer, website_manufacturer, threshold)
 
     def read_excel_data(self):
         """Read Excel file with GSA links"""
@@ -315,8 +247,19 @@ class GSAScrapingAutomation:
         """Scrape GSA page and return top 2 products matching the manufacturer"""
         try:
             if not self.driver:
-                logger.error("Driver is not initialized!")
-                return []
+                logger.warning("Driver is not initialized. Setting up driver...")
+                self.setup_driver()
+
+            # Health check: gracefully recover if the browser was closed or crashed
+            try:
+                _ = self.driver.title
+            except Exception:
+                logger.warning("WebDriver is detached or crashed. Re-initializing...")
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+                self.setup_driver()
 
             logger.info(f"Scraping: {gsa_url}")
             self.driver.get(gsa_url)
@@ -342,12 +285,22 @@ class GSAScrapingAutomation:
                     try:
                         if driver.find_elements(sel_type, sel_val):
                             return True
-                    except:
+                    except Exception:
                         continue
                 return False
 
             try:
                 WebDriverWait(self.driver, 5).until(any_product_present)
+                
+                # Human-like behavioral noise: random scroll and pause
+                try:
+                    scroll_y = random.randint(150, 400)
+                    self.driver.execute_script(f"window.scrollBy(0, {scroll_y});")
+                    time.sleep(random.uniform(0.4, 1.2))
+                    self.driver.execute_script(f"window.scrollBy(0, -{random.randint(50, scroll_y)} );")
+                    time.sleep(random.uniform(0.3, 0.8))
+                except Exception:
+                    pass
             except TimeoutException:
                 logger.warning("No product elements found within 10 seconds")
 
@@ -355,6 +308,17 @@ class GSAScrapingAutomation:
             products = self._find_product_elements()
             if not products:
                 logger.warning(f"No products found: {gsa_url}")
+                # Check if it might be an error page/captcha/block
+                if self.driver:
+                    page_text = self.driver.page_source.lower()
+                    error_keywords = ["access denied", "incident number", "captcha", "security check", "forbidden", "system error", "unexpected error", "502 bad gateway", "503 service unavailable"]
+                    if any(err in page_text for err in error_keywords):
+                        logger.error("GSA error page or block detected! Forcing browser restart.")
+                        try:
+                            self.driver.quit()
+                        except Exception:
+                            pass
+                        self.driver = None
                 return []
 
             initial_matches = self._extract_and_filter_products(products, target_manufacturer)
@@ -376,6 +340,13 @@ class GSAScrapingAutomation:
 
         except Exception as e:
             logger.error(f"Error scraping {gsa_url}: {str(e)}")
+            # Force browser to restart on the next iteration if an unhandled error occurred
+            try:
+                if self.driver:
+                    self.driver.quit()
+            except Exception:
+                pass
+            self.driver = None
             return []
 
     def _smart_scroll_to_load_more_products(self):
@@ -468,7 +439,7 @@ class GSAScrapingAutomation:
                 if elements:
                     logger.info(f"Found {len(elements)} products with: {sel_type}={sel_val}")
                     return elements
-            except:
+            except Exception:
                 continue
         logger.warning("No product elements found with any selector")
         return []
@@ -506,7 +477,7 @@ class GSAScrapingAutomation:
             if matches:
                 try:
                     return float(matches[0].replace(',', '').strip())
-                except:
+                except ValueError:
                     continue
         return None
 
@@ -584,58 +555,127 @@ class GSAScrapingAutomation:
         return None
 
     def save_results_to_db(self, part_number, products_data):
-        """Save scraped results to PostgreSQL DB via SQLModel"""
+        """Save scraped results to PostgreSQL DB."""
         try:
-            val_1 = products_data[0] if len(products_data) > 0 else {}
-            val_2 = products_data[1] if len(products_data) > 1 else {}
-            
-            with Session(self.engine) as session:
-                # Check if it already exists to upsert
-                statement = select(GSAScrapedData).where(GSAScrapedData.part_number == str(part_number))
-                rec = session.exec(statement).first()
-                
-                if rec:
-                    rec.gsa_low_price_1 = val_1.get('price')
-                    rec.unit_1 = val_1.get('unit')
-                    rec.contractor_1 = val_1.get('contractor')
-                    rec.gsa_low_price_2 = val_2.get('price')
-                    rec.unit_2 = val_2.get('unit')
-                    rec.contractor_2 = val_2.get('contractor')
-                    rec.created_at = datetime.utcnow()
-                else:
-                    rec = GSAScrapedData(
-                        part_number=str(part_number),
-                        gsa_low_price_1=val_1.get('price'),
-                        unit_1=val_1.get('unit'),
-                        contractor_1=val_1.get('contractor'),
-                        gsa_low_price_2=val_2.get('price'),
-                        unit_2=val_2.get('unit'),
-                        contractor_2=val_2.get('contractor')
-                    )
-                    session.add(rec)
-                    
-                session.commit()
-            
+            result = upsert_scraped_data(self.engine, part_number, products_data)
             logger.info(f"Saved {len(products_data)} products to DB for {part_number}")
-            return True
+            return result
         except Exception as e:
             logger.error(f"Error saving to DB for {part_number}: {str(e)}")
             return False
 
-    def identify_missing_rows(self, df):
-        """Identify rows where GSA scraped data is missing"""
-        missing_rows = []
-        for i, row in df.iterrows():
-            part_number = row.get('Part Number') or row.get('part_number', '')
-            if not part_number:
-                continue
+    def _get_link_from_db(self, part_number):
+        """Fetch the GSALink record for part_number from the DB."""
+        return get_link_by_part_number(self.engine, part_number)
+
+    def _mark_link_scraped(self, part_number):
+        """Mark a GSALink as scraped in the DB."""
+        mark_link_scraped(self.engine, part_number)
+
+    def _execute_scraping_loop(self, indices, df, column_mapping):
+        """Core scraping loop - processes a list of integer DataFrame indices."""
+        total = len(indices)
+        successful = 0
+        failed = 0
+        start_time = time.time()
+        wid = f"[W{self._worker_id}] " if self._worker_id is not None else ""
+
+        for offset, i in enumerate(indices, 1):
+            if self.stop_requested:
+                logger.warning(f"{wid}Stop requested. Exiting loop.")
+                break
+            try:
+                manufacturer = df.at[i, column_mapping['manufacturer']]
+                part_number = df.at[i, column_mapping['part_number']]
+
+                link_record = self._get_link_from_db(part_number)
+                if not link_record or not link_record.gsa_link:
+                    logger.warning(f"{wid}Row {i + 1}: No DB URL for {part_number}")
+                    if self._on_row_complete:
+                        self._on_row_complete(part_number, False)
+                    continue
+                if link_record.is_scraped:
+                    logger.info(f"{wid}Row {i + 1}: Skipping {part_number} (already scraped)")
+                    if self._on_row_complete:
+                        self._on_row_complete(part_number, True)
+                    continue
+
+                gsa_url = link_record.gsa_link
+                logger.info(f"{wid}Progress: {offset}/{total} (Row {i + 1}) - {part_number}")
+
+                # Global rate limiting across all workers
+                if self._rate_limiter:
+                    self._rate_limiter.acquire()
+                    # Add small jitter to rate-limited requests to avoid perfect cadence
+                    jitter = random.uniform(0.5, 2.0)
+                    if self._stop_event is not None:
+                        self._stop_event.wait(timeout=jitter)
+                    else:
+                        time.sleep(jitter)
+
+                t0 = time.time()
+                products_data = self.scrape_gsa_page(gsa_url, manufacturer)
+                elapsed = time.time() - t0
+
+                success = False
+                if products_data:
+                    successful += 1
+                    success = True
+                    self.save_results_to_db(part_number, products_data)
+                    logger.info(f"{wid}SUCCESS: {len(products_data)} products ({elapsed:.1f}s)")
+                else:
+                    failed += 1
+                    logger.warning(f"{wid}No matches for {part_number} ({elapsed:.1f}s)")
+
+                self._mark_link_scraped(part_number)
+
+                if self._on_row_complete:
+                    self._on_row_complete(part_number, success)
+
+                total_elapsed = time.time() - start_time
+                avg = total_elapsed / offset
+                eta_h = (total - offset) * avg / 3600
+                logger.info(f"{wid}Avg: {avg:.1f}s/row | ETA: {eta_h:.1f}h")
+
+                # Delay between requests: rate limiter handles pacing in
+                # parallel mode; standalone mode falls back to a simple sleep.
+                if not self._rate_limiter:
+                    actual_delay = max(float(SCRAPE_DELAY_SECONDS), SCRAPE_DELAY_SECONDS * random.uniform(1.0, 1.5))
+                    if self._stop_event is not None:
+                        self._stop_event.wait(timeout=actual_delay)
+                    else:
+                        time.sleep(actual_delay)
+
+            except Exception as e:
+                failed += 1
+                logger.error(f"{wid}Error on row {i + 1}: {str(e)}")
                 
-            with Session(self.engine) as session:
-                statement = select(GSAScrapedData).where(GSAScrapedData.part_number == str(part_number))
-                rec = session.exec(statement).first()
-                if not rec:
-                    missing_rows.append(i)
-                    
+                # Tear down the driver so the next iteration gets a fresh one
+                try:
+                    if self.driver:
+                        self.driver.quit()
+                except Exception:
+                    pass
+                self.driver = None
+
+                if self._on_row_complete:
+                    self._on_row_complete(str(i), False)
+
+        total_time = time.time() - start_time
+        logger.info(f"{wid}Done! {successful}/{total} successful, {failed} failed in {total_time / 60:.1f} min")
+        return successful
+
+    def identify_missing_rows(self, df):
+        """Identify DataFrame indices where GSA scraped data is absent from the DB."""
+        missing_rows = []
+        with Session(self.engine) as session:
+            scraped_parts = {
+                row.part_number for row in session.exec(select(GSAScrapedData.part_number)).all()
+            }
+        for i, row in df.iterrows():
+            part_number = str(row.get('Part Number') or row.get('part_number', '')).strip()
+            if part_number and part_number not in scraped_parts:
+                missing_rows.append(i)
         return missing_rows
 
     # ─────────────────────────────────────────────────────────────────
@@ -643,69 +683,15 @@ class GSAScrapingAutomation:
     # ─────────────────────────────────────────────────────────────────
 
     def run_scraping_test_mode(self, item_limit=3):
-        """Test with the first N rows"""
+        """Test with the first N rows."""
         try:
-            if not self.load_manufacturer_mapping():
-                return False
-
             df, column_mapping = self.read_excel_data()
             if df is None:
                 return False
-
             self.setup_driver()
-            successful = 0
-            start_time = time.time()
-
-            for i, row in df.head(item_limit).iterrows():
-                if self.stop_requested:
-                    logger.warning("Stop requested. Exiting loop.")
-                    break
-                try:
-                    manufacturer = row[column_mapping['manufacturer']]
-                    part_number = row[column_mapping['part_number']]
-
-                    # Fetch link and flag from DB
-                    with Session(self.engine) as session:
-                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
-                        link_record = session.exec(statement).first()
-
-                    if not link_record or not link_record.gsa_link:
-                        logger.warning(f"Row {i + 1}: No DB URL for {part_number}")
-                        continue
-                        
-                    if link_record.is_scraped:
-                        logger.info(f"Row {i + 1}: Skipping {part_number} (already scraped)")
-                        continue
-
-                    gsa_url = link_record.gsa_link
-                    print(f"\nTest {i + 1}/{item_limit} - {part_number} | Mfr: {manufacturer}")
-                    t0 = time.time()
-
-                    products_data = self.scrape_gsa_page(gsa_url, manufacturer)
-
-                    if products_data:
-                        successful += 1
-                        self.save_results_to_db(part_number, products_data)
-                        print(f"  SUCCESS: {len(products_data)} products ({time.time()-t0:.1f}s)")
-                    else:
-                        print(f"  WARNING: No matches found ({time.time()-t0:.1f}s)")
-
-                    # Mark as scraped in DB
-                    with Session(self.engine) as session:
-                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
-                        rec = session.exec(statement).first()
-                        if rec:
-                            rec.is_scraped = True
-                            session.add(rec)
-                            session.commit()
-                    time.sleep(6)
-
-                except Exception as e:
-                    logger.error(f"Error on row {i + 1}: {str(e)}")
-
-            print(f"\nTest complete. {successful}/{item_limit} successful in {time.time()-start_time:.1f}s")
+            indices = list(df.head(item_limit).index)
+            self._execute_scraping_loop(indices, df, column_mapping)
             return True
-
         except Exception as e:
             logger.error(f"Test mode error: {str(e)}")
             return False
@@ -714,82 +700,14 @@ class GSAScrapingAutomation:
                 self.driver.quit()
 
     def run_scraping_full(self):
-        """Full automation - process all rows"""
+        """Full automation - process all rows."""
         try:
-            if not self.load_manufacturer_mapping():
-                return False
-
             df, column_mapping = self.read_excel_data()
             if df is None:
                 return False
-
             self.setup_driver()
-            successful = 0
-            start_time = time.time()
-
-            for i, row in df.iterrows():
-                if self.stop_requested:
-                    logger.warning("Stop requested. Exiting loop.")
-                    break
-                try:
-                    manufacturer = row[column_mapping['manufacturer']]
-                    part_number = row[column_mapping['part_number']]
-
-                    # Fetch link from DB
-                    with Session(self.engine) as session:
-                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
-                        link_record = session.exec(statement).first()
-
-                    if not link_record or not link_record.gsa_link:
-                        logger.warning(f"Row {i + 1}: No URL in DB for {part_number}")
-                        continue
-                        
-                    if link_record.is_scraped:
-                        logger.info(f"Row {i + 1}: Skipping {part_number} (already scraped)")
-                        continue
-                        
-                    gsa_url = link_record.gsa_link
-
-                    print(f"\nProgress: {i + 1}/{len(df)} ({(i+1)/len(df)*100:.1f}%) - {part_number}")
-                    t0 = time.time()
-
-                    products_data = self.scrape_gsa_page(gsa_url, manufacturer)
-                    elapsed = time.time() - t0
-
-                    if products_data:
-                        successful += 1
-                        self.save_results_to_db(part_number, products_data)
-                        print(f"  SUCCESS: {len(products_data)} products ({elapsed:.1f}s)")
-                    else:
-                        print(f"  WARNING: No matches ({elapsed:.1f}s)")
-                        
-                    # Mark as scraped in DB
-                    with Session(self.engine) as session:
-                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
-                        rec = session.exec(statement).first()
-                        if rec:
-                            rec.is_scraped = True
-                            session.add(rec)
-                            session.commit()
-
-                    total_elapsed = time.time() - start_time
-                    avg = total_elapsed / (i + 1)
-                    eta_h = (len(df) - i - 1) * avg / 3600
-                    print(f"  Avg: {avg:.1f}s/row | ETA: {eta_h:.1f}h")
-
-                    if (i + 1) % 100 == 0:
-                        self.save_results_to_excel(df)
-                        print(f"  Progress saved at row {i + 1}")
-
-                    time.sleep(6)
-
-                except Exception as e:
-                    logger.error(f"Error on row {i + 1}: {str(e)}")
-
-            total_time = time.time() - start_time
-            print(f"\nDone! {successful}/{len(df)} successful in {total_time/60:.1f} min")
+            self._execute_scraping_loop(list(df.index), df, column_mapping)
             return True
-
         except Exception as e:
             logger.error(f"Full run error: {str(e)}")
             return False
@@ -798,89 +716,19 @@ class GSAScrapingAutomation:
                 self.driver.quit()
 
     def run_scraping_custom_range(self, start_row: int, end_row: int):
-        """Process a specific row range (1-based, inclusive)"""
+        """Process a specific row range (1-based, inclusive)."""
         try:
-            if not self.load_manufacturer_mapping():
-                return False
-
             df, column_mapping = self.read_excel_data()
             if df is None:
                 return False
-
-            # Convert to 0-based index and clamp
             start_idx = max(0, start_row - 1)
             end_idx = min(len(df) - 1, end_row - 1)
             if start_idx > end_idx:
                 logger.error(f"Invalid range: {start_row}-{end_row}")
                 return False
-
             self.setup_driver()
-            successful = 0
-            start_time = time.time()
-            total = end_idx - start_idx + 1
-
-            for offset, i in enumerate(range(start_idx, end_idx + 1), 1):
-                if self.stop_requested:
-                    logger.warning("Stop requested. Exiting loop.")
-                    break
-                try:
-                    row = df.iloc[i]
-                    manufacturer = df.at[i, column_mapping['manufacturer']]
-                    part_number = df.at[i, column_mapping['part_number']]
-
-                    with Session(self.engine) as session:
-                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
-                        link_record = session.exec(statement).first()
-
-                    if not link_record or not link_record.gsa_link:
-                        logger.warning(f"Row {i + 1}: No URL in DB for {part_number}")
-                        continue
-                        
-                    if link_record.is_scraped:
-                        logger.info(f"Row {i + 1}: Skipping {part_number} (already scraped)")
-                        continue
-
-                    gsa_url = link_record.gsa_link
-
-                    print(f"\nProgress: {offset}/{total} (Row {i + 1}) - {part_number}")
-                    t0 = time.time()
-
-                    products_data = self.scrape_gsa_page(gsa_url, manufacturer)
-                    elapsed = time.time() - t0
-
-                    if products_data:
-                        successful += 1
-                        self.save_results_to_db(part_number, products_data)
-                        print(f"  SUCCESS: {len(products_data)} products ({elapsed:.1f}s)")
-                    else:
-                        print(f"  WARNING: No matches ({elapsed:.1f}s)")
-                        
-                    with Session(self.engine) as session:
-                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
-                        rec = session.exec(statement).first()
-                        if rec:
-                            rec.is_scraped = True
-                            session.add(rec)
-                            session.commit()
-
-                    total_elapsed = time.time() - start_time
-                    avg = total_elapsed / offset
-                    eta_h = (total - offset) * avg / 3600
-                    print(f"  Avg: {avg:.1f}s/row | ETA: {eta_h:.1f}h")
-
-                    if offset % 100 == 0:
-                        self.save_results_to_excel(df)
-                        print(f"  Progress saved at row {i + 1}")
-
-                    time.sleep(6)
-
-                except Exception as e:
-                    logger.error(f"Error on row {i + 1}: {str(e)}")
-
-            total_time = time.time() - start_time
-            print(f"\nDone! Rows {start_row}-{end_row}: {successful}/{total} successful in {total_time/60:.1f} min")
+            self._execute_scraping_loop(list(range(start_idx, end_idx + 1)), df, column_mapping)
             return True
-
         except Exception as e:
             logger.error(f"Custom range error: {str(e)}")
             return False
@@ -888,96 +736,28 @@ class GSAScrapingAutomation:
             if self.driver:
                 self.driver.quit()
 
-    def run_scraping_missing_only(self):
-        """Scrape only rows where all output columns are empty"""
-        try:
-            if not self.load_manufacturer_mapping():
-                return False
+    def run_scraping_missing_only(self, start_from: int = 0):
+        """Scrape only rows not yet present in the DB.
 
+        Args:
+            start_from: Skip missing rows with index below this value (0 = process all).
+                        When called from the CLI the caller supplies this after prompting the user.
+        """
+        try:
             df, column_mapping = self.read_excel_data()
             if df is None:
                 return False
-
             missing_rows = self.identify_missing_rows(df)
-            print(f"Found {len(missing_rows)} rows with missing data")
-
+            logger.info(f"Found {len(missing_rows)} rows with missing data")
             if not missing_rows:
-                print("All rows already have data!")
+                logger.info("All rows already have data!")
                 return True
-
-            start_from = input("Start from which row index? (0 for all, or enter row number): ").strip()
-            if start_from.isdigit():
-                start_from = int(start_from)
+            if start_from > 0:
                 missing_rows = [r for r in missing_rows if r >= start_from]
-                print(f"Filtered to {len(missing_rows)} missing rows from row {start_from + 1}")
-
+                logger.info(f"Filtered to {len(missing_rows)} missing rows from index {start_from}")
             self.setup_driver()
-            successful = 0
-            start_time = time.time()
-            total = len(missing_rows)
-
-            for offset, i in enumerate(missing_rows, 1):
-                if self.stop_requested:
-                    logger.warning("Stop requested. Exiting loop.")
-                    break
-                try:
-                    manufacturer = df.at[i, column_mapping['manufacturer']]
-                    part_number = df.at[i, column_mapping['part_number']]
-
-                    # Fetch link from DB
-                    with Session(self.engine) as session:
-                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
-                        link_record = session.exec(statement).first()
-
-                    if not link_record or not link_record.gsa_link:
-                        logger.warning(f"Row {i + 1}: No DB URL for {part_number}")
-                        continue
-                        
-                    if link_record.is_scraped:
-                        logger.info(f"Row {i + 1}: Skipping {part_number} (already scraped)")
-                        continue
-
-                    gsa_url = link_record.gsa_link
-                    
-                    print(f"\nMissing {offset}/{total} (Row {i + 1}) - {part_number}")
-                    t0 = time.time()
-
-                    products_data = self.scrape_gsa_page(gsa_url, manufacturer)
-                    elapsed = time.time() - t0
-
-                    if products_data:
-                        successful += 1
-                        self.save_results_to_db(part_number, products_data)
-                        print(f"  SUCCESS: {len(products_data)} products ({elapsed:.1f}s)")
-                    else:
-                        print(f"  WARNING: No matches ({elapsed:.1f}s)")
-
-                    with Session(self.engine) as session:
-                        statement = select(GSALink).where(GSALink.part_number == str(part_number))
-                        rec = session.exec(statement).first()
-                        if rec:
-                            rec.is_scraped = True
-                            session.add(rec)
-                            session.commit()
-
-                    total_elapsed = time.time() - start_time
-                    avg = total_elapsed / offset
-                    eta_h = (total - offset) * avg / 3600
-                    print(f"  Avg: {avg:.1f}s/row | ETA: {eta_h:.1f}h")
-
-                    if offset % 100 == 0:
-                        self.save_results_to_excel(df)
-                        print(f"  Progress saved at row {i + 1}")
-
-                    time.sleep(6)
-
-                except Exception as e:
-                    logger.error(f"Error on row {i + 1}: {str(e)}")
-
-            total_time = time.time() - start_time
-            print(f"\nDone! {successful}/{total} missing rows filled in {total_time/60:.1f} min")
+            self._execute_scraping_loop(missing_rows, df, column_mapping)
             return True
-
         except Exception as e:
             logger.error(f"Missing-only error: {str(e)}")
             return False
@@ -995,7 +775,7 @@ def main():
     print(f"Output:       PostgreSQL DB (gsa_scraped_data table)")
     print("=" * 60)
 
-    automation = GSAScrapingAutomation(EXCEL_FILE, MFR_MAPPING_FILE)
+    automation = GSAScrapingAutomation(EXCEL_FILE)
 
     while True:
         print("\nChoose automation mode:")
@@ -1032,7 +812,12 @@ def main():
                 print("Please enter valid numbers.")
                 continue
         elif choice == '4':
-            success = automation.run_scraping_missing_only()
+            try:
+                start_from_input = input("Start from row index (0 for all): ").strip()
+                start_from = int(start_from_input) if start_from_input.isdigit() else 0
+            except ValueError:
+                start_from = 0
+            success = automation.run_scraping_missing_only(start_from=start_from)
         else:
             print("Invalid choice.")
             continue

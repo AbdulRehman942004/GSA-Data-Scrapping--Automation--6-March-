@@ -7,13 +7,13 @@ from datetime import datetime
 import logging
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 import sys
-import os
 import yaml
 
 # Ensure the root project dir is in sys.path so we can import models.py
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.models import GSALink
 from database.db import get_engine
+from database.repository import upsert_link
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -214,27 +214,50 @@ class GSALinkAutomationFast:
             return False
 
     def save_results_to_db(self, part_number, gsa_link):
-        """Save a single link to the database using an upsert or skip if None"""
+        """Save a single link to the database using an upsert or skip if None."""
         if not self.engine or not gsa_link:
             return False
-            
         try:
-            with Session(self.engine) as session:
-                # Basic upsert (merge)
-                statement = select(GSALink).where(GSALink.part_number == part_number)
-                link_record = session.exec(statement).first()
-                if link_record:
-                    link_record.gsa_link = gsa_link
-                    link_record.created_at = datetime.utcnow()
-                else:
-                    link_record = GSALink(part_number=part_number, gsa_link=gsa_link)
-                    session.add(link_record)
-                
-                session.commit()
-            return True
+            return upsert_link(self.engine, part_number, gsa_link)
         except Exception as e:
             logger.error(f"Error saving {part_number} to DB: {str(e)}")
             return False
+
+    def _execute_link_loop(self, part_numbers):
+        """Core loop: construct and persist GSA URLs for each part number."""
+        total = len(part_numbers)
+        successful_links = 0
+        start_time = time.time()
+
+        for i, part_number in enumerate(part_numbers, 1):
+            if self.stop_requested:
+                logger.warning("Stop requested. Exiting loop.")
+                break
+
+            gsa_url = self.construct_gsa_url(part_number)
+            if gsa_url:
+                self.save_results_to_db(part_number, gsa_url)
+                successful_links += 1
+
+                if i <= 10 or i % 1000 == 0 or i == total:
+                    elapsed = time.time() - start_time
+                    rate = i / elapsed if elapsed > 0 else 0
+                    eta_min = ((total - i) / rate / 60) if rate > 0 else 0
+                    logger.info(
+                        f"Progress: {i}/{total} ({i/total*100:.1f}%) | "
+                        f"Rate: {rate:.1f}/sec | ETA: {eta_min:.1f} min | "
+                        f"Part: {part_number}"
+                    )
+            else:
+                logger.error(f"Failed to construct URL for {part_number}")
+
+        total_time = time.time() - start_time
+        rate = total / total_time if total_time > 0 else 0
+        logger.info(
+            f"Link loop complete: {successful_links}/{total} successful | "
+            f"{total_time:.1f}s | {rate:.1f} items/sec"
+        )
+        return successful_links
     
     def cleanup_old_backups(self, keep_last=5):
         """Clean up old backup files, keeping only the most recent ones"""
@@ -255,216 +278,60 @@ class GSALinkAutomationFast:
             logger.warning(f"Error during backup cleanup: {str(e)}")
     
     def run_automation_fast(self):
-        """Main method to run the super-fast automation"""
+        """Run link generation for all part numbers."""
         try:
-            # Read Excel data
-            df, stock_column_name = self.read_excel_data()
+            df, col = self.read_excel_data()
             if df is None:
                 logger.error("No data found in Excel file")
                 return False
-            
-            part_numbers = df[stock_column_name].dropna().astype(str).tolist()
-            logger.info(f"Starting super-fast processing of {len(part_numbers)} part numbers")
-
-            # Process all part numbers
-            successful_links = 0
-            start_time = time.time()
-
-            for i, part_number in enumerate(part_numbers, 1):
-                if self.stop_requested:
-                    logger.warning("Stop requested. Exiting loop.")
-                    break
-                # Construct the URL directly
-                gsa_url = self.construct_gsa_url(part_number)
-
-                if gsa_url:
-                    # Update the dataframe with the link
-                    df.at[i-1, 'Links'] = gsa_url
-                    
-                    # Save directly to Postgres
-                    self.save_results_to_db(part_number, gsa_url)
-                    
-                    successful_links += 1
-
-                    # Show progress every 1000 items or for first 10 items
-                    if i <= 10 or i % 1000 == 0 or i == len(part_numbers):
-                        elapsed_time = time.time() - start_time
-                        rate = i / elapsed_time if elapsed_time > 0 else 0
-                        eta_seconds = (len(part_numbers) - i) / rate if rate > 0 else 0
-                        eta_minutes = eta_seconds / 60
-
-                        print(f"Progress: {i}/{len(part_numbers)} ({i/len(part_numbers)*100:.1f}%) - "
-                              f"Rate: {rate:.1f} items/sec - ETA: {eta_minutes:.1f} min - "
-                              f"Processing: {part_number}")
-                        logger.info(f"Processed {i}/{len(part_numbers)}: {part_number}")
-
-                # Save every 1000 items for safety
-                # if i % 1000 == 0:
-                #     save_success = self.save_results_to_excel(df)
-                #     if not save_success:
-                #         logger.error(f"Failed to save results at item {i}")
-                #         print(f"ERROR: Failed to save Excel file at item {i}")
-
-            # Final save (Excel fallback)
-            # save_success = self.save_results_to_excel(df)
-            # if not save_success:
-            #     logger.error("Failed to save final results to Excel")
-            #     return False
-
-            # Calculate final statistics
-            total_time = time.time() - start_time
-            rate = len(part_numbers) / total_time if total_time > 0 else 0
-
-            logger.info(f"Super-fast automation completed!")
-            logger.info(f"Processed: {len(part_numbers)} part numbers")
-            logger.info(f"Successful links: {successful_links}")
-            logger.info(f"Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
-            logger.info(f"Processing rate: {rate:.1f} items/second")
-            
-            # Clean up old backup files
-            # self.cleanup_old_backups()
-            
+            part_numbers = df[col].dropna().astype(str).tolist()
+            logger.info(f"Full mode: processing {len(part_numbers)} part numbers")
+            self._execute_link_loop(part_numbers)
             return True
-            
         except Exception as e:
-            logger.error(f"Error in super-fast automation: {str(e)}")
+            logger.error(f"Error in full automation: {str(e)}")
             return False
-    
+
     def run_automation_fast_test_mode(self, item_limit=5):
-        """Test method to run super-fast automation with limited items"""
+        """Run link generation for the first item_limit part numbers."""
         try:
-            # Read Excel data
-            df, stock_column_name = self.read_excel_data()
+            df, col = self.read_excel_data()
             if df is None:
                 logger.error("No data found in Excel file")
                 return False
-            
-            stock_numbers = df[stock_column_name].dropna().astype(str).tolist()
-            test_stock_numbers = stock_numbers[:item_limit]
-            
-            logger.info(f"Test mode: Processing {len(test_stock_numbers)} stock numbers")
-            
-            # Process test stock numbers
-            successful_links = 0
-            start_time = time.time()
-            
-            for i, stock_number in enumerate(test_stock_numbers, 1):
-                if self.stop_requested:
-                    logger.warning("Stop requested. Exiting loop.")
-                    break
-                # Construct the URL directly
-                gsa_url = self.construct_gsa_url(stock_number)
-                
-                if gsa_url:
-                    # Update the dataframe with the link
-                    df.at[i-1, 'Links'] = gsa_url
-                    
-                    # Save directly to Postgres
-                    self.save_results_to_db(stock_number, gsa_url)
-                    
-                    successful_links += 1
-                    print(f"[SUCCESS] {i}/{len(test_stock_numbers)} - {stock_number} -> {gsa_url}")
-                    logger.info(f"Processed {i}/{len(test_stock_numbers)}: {stock_number}")
-                else:
-                    print(f"[FAILED] {i}/{len(test_stock_numbers)} - {stock_number} -> Failed to construct URL")
-                    logger.error(f"Failed to construct URL for {stock_number}")
-            
-            # Calculate final statistics
-            total_time = time.time() - start_time
-            rate = len(test_stock_numbers) / total_time if total_time > 0 else 0
-            
-            print(f"\n[DONE] Test completed!")
-            print(f"Processed: {len(test_stock_numbers)} stock numbers")
-            print(f"Successful links: {successful_links}")
-            print(f"Total time: {total_time:.2f} seconds")
-            print(f"Processing rate: {rate:.1f} items/second")
-            
-            logger.info(f"Test automation completed successfully")
+            part_numbers = df[col].dropna().astype(str).tolist()[:item_limit]
+            logger.info(f"Test mode: processing {len(part_numbers)} part numbers")
+            self._execute_link_loop(part_numbers)
             return True
-            
         except Exception as e:
             logger.error(f"Error in test automation: {str(e)}")
             return False
-    
+
     def run_automation_fast_custom_range(self, start_row, end_row):
-        """Run super-fast automation for a specific range of rows"""
+        """Run link generation for a 1-based inclusive row range."""
         try:
-            # Read Excel data
-            df, stock_column_name = self.read_excel_data()
+            df, col = self.read_excel_data()
             if df is None:
                 logger.error("No data found in Excel file")
                 return False
-            
-            stock_numbers = df[stock_column_name].dropna().astype(str).tolist()
-            
-            # Take only the specified range of stock numbers (convert to 0-based index)
-            start_idx = start_row - 1  # Convert to 0-based index
-            end_idx = end_row  # end_row is already 1-based, so we use it as-is
-            custom_stock_numbers = stock_numbers[start_idx:end_idx]
-            
-            if len(custom_stock_numbers) == 0:
-                logger.error(f"No stock numbers found in range {start_row}-{end_row}")
+            all_numbers = df[col].dropna().astype(str).tolist()
+            part_numbers = all_numbers[start_row - 1:end_row]
+            if not part_numbers:
+                logger.error(f"No part numbers in range {start_row}-{end_row}")
                 return False
-            
-            logger.info(f"Custom range mode: Processing rows {start_row}-{end_row} ({len(custom_stock_numbers)} stock numbers)")
-            
-            # Process custom range stock numbers
-            successful_links = 0
-            start_time = time.time()
-            
-            for i, stock_number in enumerate(custom_stock_numbers, 1):
-                if self.stop_requested:
-                    logger.warning("Stop requested. Exiting loop.")
-                    break
-                actual_row = start_row + i - 1  # Calculate actual row number
-                
-                # Construct the URL directly
-                gsa_url = self.construct_gsa_url(stock_number)
-                
-                if gsa_url:
-                    # Update the dataframe with the link
-                    df.at[actual_row-1, 'Links'] = gsa_url
-                    
-                    # Save directly to Postgres
-                    self.save_results_to_db(stock_number, gsa_url)
-                    
-                    successful_links += 1
-                    
-                    # Show progress every 100 items or for first 10 items
-                    if i <= 10 or i % 100 == 0 or i == len(custom_stock_numbers):
-                        elapsed_time = time.time() - start_time
-                        rate = i / elapsed_time if elapsed_time > 0 else 0
-                        eta_seconds = (len(custom_stock_numbers) - i) / rate if rate > 0 else 0
-                        eta_minutes = eta_seconds / 60
-                        
-                        print(f"Progress: {i}/{len(custom_stock_numbers)} (Row {actual_row}) - "
-                              f"Rate: {rate:.1f} items/sec - ETA: {eta_minutes:.1f} min - "
-                              f"Processing: {stock_number}")
-                        logger.info(f"Processing {i}/{len(custom_stock_numbers)} (Row {actual_row}): {stock_number}")
-                else:
-                    print(f"[FAILED] Row {actual_row} - {stock_number} -> Failed to construct URL")
-                    logger.error(f"Failed to construct URL for {stock_number} (Row {actual_row})")
-            
-            # Calculate final statistics
-            total_time = time.time() - start_time
-            rate = len(custom_stock_numbers) / total_time if total_time > 0 else 0
-            
-            logger.info(f"Custom range automation completed!")
-            logger.info(f"Processed: {len(custom_stock_numbers)} stock numbers")
-            logger.info(f"Successful links: {successful_links}")
-            logger.info(f"Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
-            logger.info(f"Processing rate: {rate:.1f} items/second")
-            
+            logger.info(f"Custom range mode: rows {start_row}-{end_row} ({len(part_numbers)} items)")
+            self._execute_link_loop(part_numbers)
             return True
-            
         except Exception as e:
             logger.error(f"Error in custom range automation: {str(e)}")
             return False
 
 def main():
     """Main function to run the super-fast automation"""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    excel_file = os.path.join(script_dir, "..", "new_requirements", "GSA Advantage Low price.xlsx")
+    import sys
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from settings import EXCEL_FILE_PATH
+    excel_file = EXCEL_FILE_PATH
 
     while True:
         print("\n" + "="*60)

@@ -1,13 +1,26 @@
+import sys
 import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from sqlmodel import create_engine
-from dotenv import load_dotenv
+from settings import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, SCRAPE_MAX_WORKERS
+
+_engine = None
+
 
 def get_engine():
-    load_dotenv()
-    host = os.getenv("POSTGRESQL_HOST", "localhost")
-    port = os.getenv("POSTGRESQL_PORT", "5432")
-    database = os.getenv("POSTGRESQL_DATABASE", "gsa_data")
-    username = os.getenv("POSTGRESQL_USERNAME", "postgres")
-    password = os.getenv("POSTGRESQL_PASSWORD", "12345")
-    db_url = f"postgresql://{username}:{password}@{host}:{port}/{database}"
-    return create_engine(db_url)
+    global _engine
+    if _engine is not None:
+        return _engine
+
+    if not DB_PASSWORD:
+        raise ValueError("POSTGRESQL_PASSWORD environment variable is not set.")
+
+    db_url = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    _engine = create_engine(
+        db_url,
+        pool_size=max(10, SCRAPE_MAX_WORKERS * 2 + 5),
+        max_overflow=10,
+        pool_pre_ping=True,
+    )
+    return _engine
