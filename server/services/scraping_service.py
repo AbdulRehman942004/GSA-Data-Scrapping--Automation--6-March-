@@ -3,6 +3,7 @@ import time
 import re
 import os
 import shutil
+import random
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -34,7 +35,7 @@ EXCEL_FILE = EXCEL_FILE_PATH
 
 class GSAScrapingAutomation:
     def __init__(self, excel_file_path, stop_event=None, rate_limiter=None,
-                 on_row_complete=None, worker_id=None, proxy=None):
+                 on_row_complete=None, worker_id=None, proxy=None, proxies=None):
         self.excel_file_path = excel_file_path
         self.driver = None
         self.wait = None
@@ -49,6 +50,7 @@ class GSAScrapingAutomation:
         self._on_row_complete = on_row_complete
         self._worker_id = worker_id
         self._proxy = proxy  # {"host", "port", "user", "pass"} or None
+        self._proxies = proxies
         self._proxy_ext_path = None  # temp file cleanup
 
     @property
@@ -128,6 +130,18 @@ class GSAScrapingAutomation:
     def setup_driver(self):
         """Initialize Chrome driver with optimized options for speed"""
         chrome_options = Options()
+
+        # User-Agent rotation for stealth
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/122.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:123.0) Gecko/20100101 Firefox/123.0"
+        ]
+        chosen_ua = random.choice(user_agents)
+        chrome_options.add_argument(f"user-agent={chosen_ua}")
+        
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -158,8 +172,14 @@ class GSAScrapingAutomation:
         })
 
         # Proxy configuration
-        if self._proxy:
-            proxy = self._proxy
+        active_proxy = None
+        if self._proxies:
+            active_proxy = random.choice(self._proxies)
+        elif self._proxy:
+            active_proxy = self._proxy
+
+        if active_proxy:
+            proxy = active_proxy
             if proxy.get("user"):
                 # Authenticated proxy → needs Chrome extension
                 # NOTE: --disable-extensions must NOT be set for this to work
@@ -271,6 +291,16 @@ class GSAScrapingAutomation:
 
             try:
                 WebDriverWait(self.driver, 5).until(any_product_present)
+                
+                # Human-like behavioral noise: random scroll and pause
+                try:
+                    scroll_y = random.randint(150, 400)
+                    self.driver.execute_script(f"window.scrollBy(0, {scroll_y});")
+                    time.sleep(random.uniform(0.4, 1.2))
+                    self.driver.execute_script(f"window.scrollBy(0, -{random.randint(50, scroll_y)} );")
+                    time.sleep(random.uniform(0.3, 0.8))
+                except Exception:
+                    pass
             except TimeoutException:
                 logger.warning("No product elements found within 10 seconds")
 
@@ -576,6 +606,12 @@ class GSAScrapingAutomation:
                 # Global rate limiting across all workers
                 if self._rate_limiter:
                     self._rate_limiter.acquire()
+                    # Add small jitter to rate-limited requests to avoid perfect cadence
+                    jitter = random.uniform(0.5, 2.0)
+                    if self._stop_event is not None:
+                        self._stop_event.wait(timeout=jitter)
+                    else:
+                        time.sleep(jitter)
 
                 t0 = time.time()
                 products_data = self.scrape_gsa_page(gsa_url, manufacturer)
@@ -604,10 +640,11 @@ class GSAScrapingAutomation:
                 # Delay between requests: rate limiter handles pacing in
                 # parallel mode; standalone mode falls back to a simple sleep.
                 if not self._rate_limiter:
+                    actual_delay = max(float(SCRAPE_DELAY_SECONDS), SCRAPE_DELAY_SECONDS * random.uniform(1.0, 1.5))
                     if self._stop_event is not None:
-                        self._stop_event.wait(timeout=SCRAPE_DELAY_SECONDS)
+                        self._stop_event.wait(timeout=actual_delay)
                     else:
-                        time.sleep(SCRAPE_DELAY_SECONDS)
+                        time.sleep(actual_delay)
 
             except Exception as e:
                 failed += 1

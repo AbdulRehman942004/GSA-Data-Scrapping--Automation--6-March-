@@ -246,16 +246,13 @@ class ParallelScrapingOrchestrator:
         def on_complete(part_number: str, success: bool):
             self.tracker.record(worker_id, part_number, success)
 
-        # Assign proxy round-robin (if available)
-        proxy = self.proxies[worker_id % len(self.proxies)] if self.proxies else None
-
         automation = GSAScrapingAutomation(
             excel_file_path=EXCEL_FILE_PATH,
             stop_event=self.stop_event,
             rate_limiter=self.rate_limiter,  # None when proxies are used
             on_row_complete=on_complete,
             worker_id=worker_id,
-            proxy=proxy,
+            proxies=self.proxies,
         )
 
         while retries < SCRAPE_WORKER_MAX_RETRIES:
