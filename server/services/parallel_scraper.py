@@ -232,6 +232,14 @@ class ParallelScrapingOrchestrator:
 
     def _run_worker(self, worker_id: int, indices: list, df, column_mapping: dict) -> int:
         """Single worker thread: owns its own WebDriver."""
+        # Stagger startup: each worker waits (worker_id * 2) seconds before
+        # first request. Prevents all workers from slamming GSA simultaneously.
+        if worker_id > 0:
+            stagger = worker_id * 2  # 0s, 2s, 4s, 6s, 8s, ... 18s for 10 workers
+            logger.info(f"Worker {worker_id} staggering startup by {stagger}s")
+            if self.stop_event.wait(timeout=stagger):
+                return 0  # stop was requested during stagger
+
         self.tracker.mark_worker(worker_id, "running")
         retries = 0
 

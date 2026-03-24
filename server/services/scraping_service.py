@@ -278,6 +278,17 @@ class GSAScrapingAutomation:
             products = self._find_product_elements()
             if not products:
                 logger.warning(f"No products found: {gsa_url}")
+                # Check if it might be an error page/captcha/block
+                if self.driver:
+                    page_text = self.driver.page_source.lower()
+                    error_keywords = ["access denied", "incident number", "captcha", "security check", "forbidden", "system error", "unexpected error", "502 bad gateway", "503 service unavailable"]
+                    if any(err in page_text for err in error_keywords):
+                        logger.error("GSA error page or block detected! Forcing browser restart.")
+                        try:
+                            self.driver.quit()
+                        except Exception:
+                            pass
+                        self.driver = None
                 return []
 
             initial_matches = self._extract_and_filter_products(products, target_manufacturer)
@@ -299,6 +310,13 @@ class GSAScrapingAutomation:
 
         except Exception as e:
             logger.error(f"Error scraping {gsa_url}: {str(e)}")
+            # Force browser to restart on the next iteration if an unhandled error occurred
+            try:
+                if self.driver:
+                    self.driver.quit()
+            except Exception:
+                pass
+            self.driver = None
             return []
 
     def _smart_scroll_to_load_more_products(self):
@@ -594,6 +612,15 @@ class GSAScrapingAutomation:
             except Exception as e:
                 failed += 1
                 logger.error(f"{wid}Error on row {i + 1}: {str(e)}")
+                
+                # Tear down the driver so the next iteration gets a fresh one
+                try:
+                    if self.driver:
+                        self.driver.quit()
+                except Exception:
+                    pass
+                self.driver = None
+
                 if self._on_row_complete:
                     self._on_row_complete(str(i), False)
 
