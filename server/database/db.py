@@ -1,21 +1,21 @@
+import sys
 import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from sqlmodel import create_engine
-from dotenv import load_dotenv
+from settings import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 
 _engine = None
+
 
 def get_engine():
     global _engine
     if _engine is not None:
         return _engine
 
-    load_dotenv()
-    host = os.getenv("POSTGRESQL_HOST", "localhost")
-    port = os.getenv("POSTGRESQL_PORT", "5432")
-    database = os.getenv("POSTGRESQL_DATABASE", "gsa_data")
-    username = os.getenv("POSTGRESQL_USERNAME", "postgres")
-    password = os.getenv("POSTGRESQL_PASSWORD", "12345")
-    db_url = f"postgresql://{username}:{password}@{host}:{port}/{database}"
-    
+    if not DB_PASSWORD:
+        raise ValueError("POSTGRESQL_PASSWORD environment variable is not set.")
+
+    db_url = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     _engine = create_engine(db_url)
     return _engine

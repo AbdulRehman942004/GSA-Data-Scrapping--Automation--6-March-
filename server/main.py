@@ -2,19 +2,16 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
-import os
 import threading
 
-# Import project automation modules
-from link_generation.gsa_link_automation_fast import GSALinkAutomationFast, GSALink
-from scraping.gsa_scraping_automation import GSAScrapingAutomation, MFR_MAPPING_FILE, GSAScrapedData
+# Project modules
+from link_generation.gsa_link_automation_fast import GSALinkAutomationFast
+from scraping.gsa_scraping_automation import GSAScrapingAutomation
 from export_to_excel import export_to_excel
-
-# Database imports
-from sqlmodel import Session, select, create_engine
 from database.models import GSALink, GSAScrapedData
 from database.db import get_engine
-from dotenv import load_dotenv
+from settings import ALLOWED_ORIGINS, EXCEL_FILE_PATH, MFR_MAPPING_FILE_PATH
+from sqlmodel import Session, select
 
 # Define the FastAPI application
 app = FastAPI(
@@ -25,24 +22,18 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust this in production, e.g., ["http://localhost:3000"]
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Global variables to track status
+# Global state
 state_lock = threading.Lock()
 is_link_generation_running = False
 is_scraping_running = False
-
-# Active automation objects for stopping
 active_link_automation = None
 active_scraping_automation = None
-
-# Constants
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-EXCEL_FILE = os.path.join(SCRIPT_DIR, "new_requirements", "GSA Advantage Low price.xlsx")
 
 # API Models
 class LinkGenerationRequest(BaseModel):
@@ -61,29 +52,31 @@ class ScrapingRequest(BaseModel):
 def task_run_link_generation(req: LinkGenerationRequest):
     global is_link_generation_running, active_link_automation
     try:
-        automation = GSALinkAutomationFast(EXCEL_FILE)
+        automation = GSALinkAutomationFast(EXCEL_FILE_PATH)
         active_link_automation = automation
-        
+
         if req.mode == "test":
             automation.run_automation_fast_test_mode(req.item_limit)
         elif req.mode == "full":
             automation.run_automation_fast()
         elif req.mode == "custom":
             automation.run_automation_fast_custom_range(req.start_row, req.end_row)
-            
+
     except Exception as e:
-        print(f"Error in link generation background task: {e}")
+        import logging
+        logging.getLogger(__name__).error(f"Link generation background task error: {e}")
     finally:
         with state_lock:
             is_link_generation_running = False
             active_link_automation = None
 
+
 def task_run_scraping(req: ScrapingRequest):
     global is_scraping_running, active_scraping_automation
     try:
-        automation = GSAScrapingAutomation(EXCEL_FILE, MFR_MAPPING_FILE)
+        automation = GSAScrapingAutomation(EXCEL_FILE_PATH, MFR_MAPPING_FILE_PATH)
         active_scraping_automation = automation
-        
+
         if req.mode == "test":
             automation.run_scraping_test_mode(req.item_limit)
         elif req.mode == "full":
@@ -92,9 +85,10 @@ def task_run_scraping(req: ScrapingRequest):
             automation.run_scraping_missing_only()
         elif req.mode == "custom":
             automation.run_scraping_custom_range(req.start_row, req.end_row)
-            
+
     except Exception as e:
-        print(f"Error in scraping background task: {e}")
+        import logging
+        logging.getLogger(__name__).error(f"Scraping background task error: {e}")
     finally:
         with state_lock:
             is_scraping_running = False
@@ -105,27 +99,55 @@ def task_run_scraping(req: ScrapingRequest):
 def read_root():
     return {"message": "Welcome to the GSA Scraper Automation API. Go to /docs to view your available endpoints!"}
 
+VALID_LINK_MODES = {"test", "full", "custom"}
+VALID_SCRAPE_MODES = {"test", "full", "missing", "custom"}
+
+
+def _validate_range(start_row: int, end_row: int) -> None:
+    if start_row < 1:
+        raise HTTPException(status_code=422, detail="start_row must be >= 1.")
+    if end_row < start_row:
+        raise HTTPException(status_code=422, detail="end_row must be >= start_row.")
+    if end_row - start_row > 50_000:
+        raise HTTPException(status_code=422, detail="Range cannot exceed 50,000 rows.")
+
+
 @app.post("/api/links/generate")
 async def generate_links(req: LinkGenerationRequest, background_tasks: BackgroundTasks):
     global is_link_generation_running
-    
+
+    if req.mode not in VALID_LINK_MODES:
+        raise HTTPException(status_code=422, detail=f"Invalid mode '{req.mode}'. Choose from: {VALID_LINK_MODES}")
+    if req.mode == "custom":
+        _validate_range(req.start_row, req.end_row)
+    if req.item_limit < 1:
+        raise HTTPException(status_code=422, detail="item_limit must be >= 1.")
+
     with state_lock:
         if is_link_generation_running:
             raise HTTPException(status_code=400, detail="Link generation is already actively running.")
         is_link_generation_running = True
-        
+
     background_tasks.add_task(task_run_link_generation, req)
     return {"status": "started", "message": f"Link generation mode '{req.mode}' has been queued."}
+
 
 @app.post("/api/scrape/start")
 async def start_scraping(req: ScrapingRequest, background_tasks: BackgroundTasks):
     global is_scraping_running
-    
+
+    if req.mode not in VALID_SCRAPE_MODES:
+        raise HTTPException(status_code=422, detail=f"Invalid mode '{req.mode}'. Choose from: {VALID_SCRAPE_MODES}")
+    if req.mode == "custom":
+        _validate_range(req.start_row, req.end_row)
+    if req.item_limit < 1:
+        raise HTTPException(status_code=422, detail="item_limit must be >= 1.")
+
     with state_lock:
         if is_scraping_running:
             raise HTTPException(status_code=400, detail="Scraping process is already actively running.")
         is_scraping_running = True
-        
+
     background_tasks.add_task(task_run_scraping, req)
     return {"status": "started", "message": f"Scraping mode '{req.mode}' has been queued."}
 

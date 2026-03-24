@@ -1,5 +1,4 @@
 import pandas as pd
-from sqlalchemy import create_engine
 import os
 import sys
 import io
@@ -8,18 +7,18 @@ from datetime import datetime
 # Ensure the root project dir is in sys.path so we can import modules
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 from database.db import get_engine
+from settings import EXCEL_FILE_PATH
 
 def export_to_excel():
-    
+
     try:
         engine = get_engine()
     except Exception as e:
-        print(f"Failed to connect to the database: {e}")
+        import logging
+        logging.getLogger(__name__).error(f"Failed to connect to the database: {e}")
         return None
-    
-    # File paths
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    input_excel = os.path.join(script_dir, "new_requirements", "GSA Advantage Low price.xlsx")
+
+    input_excel = EXCEL_FILE_PATH
     
     timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     filename = f"gsa_scrapped_products_{timestamp}.xlsx"
@@ -63,25 +62,27 @@ def export_to_excel():
         else:
             df[col] = df[col].astype(object)
     
-    # Create an easy lookup dictionary from part_number to data row
+    # Build a direct lookup: part_number → row
     print("Merging scraped data into Excel structure...")
-    scraped_dict = {}
-    for _, row in scraped_df.iterrows():
-        p_num = str(row['part_number']).strip()
-        scraped_dict[p_num] = row
+    scraped_df['part_number'] = scraped_df['part_number'].astype(str).str.strip()
+    scraped_dict = scraped_df.set_index('part_number').to_dict('index')
         
+    def _val(data, key):
+        v = data.get(key)
+        return v if v is not None and not (isinstance(v, float) and pd.isna(v)) else ''
+
     # Update the final dataframe
     updated_count = 0
     for idx, row in df.iterrows():
         part_num = str(row[part_num_col]).strip()
         if part_num in scraped_dict:
             data = scraped_dict[part_num]
-            df.at[idx, '1 GSA Low Price'] = data['gsa_low_price_1'] if pd.notna(data['gsa_low_price_1']) else ''
-            df.at[idx, 'Unit'] = data['unit_1'] if pd.notna(data['unit_1']) else ''
-            df.at[idx, 'Contractor:Name'] = data['contractor_1'] if pd.notna(data['contractor_1']) else ''
-            df.at[idx, '2 GSA Low Price'] = data['gsa_low_price_2'] if pd.notna(data['gsa_low_price_2']) else ''
-            df.at[idx, 'Unit.1'] = data['unit_2'] if pd.notna(data['unit_2']) else ''
-            df.at[idx, 'Contractor:Name.1'] = data['contractor_2'] if pd.notna(data['contractor_2']) else ''
+            df.at[idx, '1 GSA Low Price'] = _val(data, 'gsa_low_price_1')
+            df.at[idx, 'Unit'] = _val(data, 'unit_1')
+            df.at[idx, 'Contractor:Name'] = _val(data, 'contractor_1')
+            df.at[idx, '2 GSA Low Price'] = _val(data, 'gsa_low_price_2')
+            df.at[idx, 'Unit.1'] = _val(data, 'unit_2')
+            df.at[idx, 'Contractor:Name.1'] = _val(data, 'contractor_2')
             updated_count += 1
             
     print(f"Successfully matched and injected {updated_count} rows with scraped data.")
