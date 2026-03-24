@@ -1,9 +1,24 @@
+"""
+Step 1 of the manufacturer normalization pipeline.
+
+Reads an Essendant product Excel file, extracts unique manufacturer names
+from a specified column, and writes them to a .txt file (one name per line).
+
+The output feeds directly into normalize_mfr_names.py (Step 2).
+
+Usage:
+    python utils/extract_unique_manufacturers.py
+    python utils/extract_unique_manufacturers.py --excel path/to/file.xlsx --output path/to/out.txt
+"""
 import argparse
 from pathlib import Path
 from typing import List
 
 import pandas as pd
 
+# Resolve paths relative to the server root (one level up from this file)
+_SERVER_DIR = Path(__file__).resolve().parent.parent
+_MFR_DATA_DIR = _SERVER_DIR / "manufacturer_normalization" / "identify_unique_mfr"
 
 DEFAULT_COLUMN_NAME: str = "Manufacturer Long Name"
 
@@ -20,7 +35,6 @@ def load_unique_manufacturers(
     if not excel_path.exists():
         raise FileNotFoundError(f"Excel file not found: {excel_path}")
 
-    # Read the Excel file; openpyxl handles .xlsx reliably
     dataframe = pd.read_excel(excel_path, engine="openpyxl")
 
     if column_name not in dataframe.columns:
@@ -29,16 +43,8 @@ def load_unique_manufacturers(
             f"Column '{column_name}' not found. Available columns: {available}"
         )
 
-    column_series = dataframe[column_name]
-
-    # Normalize values: keep as strings, strip whitespace, drop null/empty
-    # Use pandas StringDtype to preserve NaN semantics while applying .str ops
-    column_series = column_series.astype("string").str.strip()
-
-    # Remove nulls and empty strings
+    column_series = dataframe[column_name].astype("string").str.strip()
     column_series = column_series[column_series.notna() & (column_series != "")]
-
-    # Drop duplicates and sort for deterministic output
     unique_names = sorted(column_series.drop_duplicates().tolist())
 
     return unique_names
@@ -50,36 +56,30 @@ def write_list_to_file(values: List[str], output_path: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    project_dir = Path(__file__).parent
-
-    default_excel = project_dir / "essendant-product-list (1).xlsx"
-    default_output = project_dir / "unique_manufacturers.txt"
-
     parser = argparse.ArgumentParser(
         description=(
             "Extract unique manufacturer names from an Excel file column and "
-            "print/save the list."
+            "save the list to a .txt file."
         )
     )
     parser.add_argument(
         "--excel",
         type=Path,
-        default=default_excel,
-        help=f"Path to the Excel file (default: {default_excel.name})",
+        default=_MFR_DATA_DIR / "essendant-product-list (1).xlsx",
+        help="Path to the Essendant product Excel file.",
     )
     parser.add_argument(
         "--column",
         type=str,
         default=DEFAULT_COLUMN_NAME,
-        help=f"Column name to extract (default: '{DEFAULT_COLUMN_NAME}')",
+        help=f"Column name to extract (default: '{DEFAULT_COLUMN_NAME}').",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=default_output,
-        help=f"Output text file for unique names (default: {default_output.name})",
+        default=_MFR_DATA_DIR / "unique_manufacturers.txt",
+        help="Output .txt file for unique manufacturer names.",
     )
-
     return parser.parse_args()
 
 
@@ -88,18 +88,14 @@ def main() -> None:
 
     try:
         unique_manufacturers = load_unique_manufacturers(args.excel, args.column)
-    except Exception as exc:  # Only at the top level to show a helpful error
+    except Exception as exc:
         print(f"Error: {exc}")
         return
 
-    # Write to file and print to console
     write_list_to_file(unique_manufacturers, args.output)
 
     print(f"Found {len(unique_manufacturers)} unique manufacturers in '{args.column}'.")
     print(f"Saved list to: {args.output}")
-    print("\nUnique manufacturers:")
-    for name in unique_manufacturers:
-        print(name)
 
 
 if __name__ == "__main__":
