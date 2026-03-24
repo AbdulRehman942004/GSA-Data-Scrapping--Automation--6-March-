@@ -3,23 +3,10 @@
 ## Overview
 This project provides an automated pipeline for generating search links, normalizing manufacturer data, and scraping product information (price, unit of measure, and contractor) from the GSA Advantage platform.
 
-## Project Structure
-The automation process is divided into three main stages:
-
-1. **link_generation**
-   Constructs direct GSA Advantage search URLs for each product in the input Excel file using a deterministic pattern, bypassing the need for browser interaction. 
-   It features a super-fast generation mode (`gsa_link_automation_fast.py`) that exports the results to an Excel fallback file as well as a PostgreSQL database using SQLModel for robust data management.
-
-2. **manufacturer_normalization**
-   Extracts unique manufacturer names from the dataset and normalizes them into a simplified root format for accurate matching during the scraping phase.
-
-3. **scraping**
-   Uses Selenium to navigate the generated GSA Advantage links, extract product details (price, unit, contractor), and match them against the normalized manufacturer roots using fuzzy logic. Also includes a utility to update search links for missing rows using alternative identifiers for a secondary scraping pass.
-
 ## Setup Instructions
 
 ### Prerequisites
-- Python 3.9+ 
+- Python 3.11+ 
 - Google Chrome (for the Selenium scraper)
 - PostgreSQL Server (running locally or remotely)
 
@@ -68,15 +55,10 @@ The automation process is divided into three main stages:
    POSTGRESQL_DATABASE=gsa_data
    POSTGRESQL_USERNAME=postgres
    POSTGRESQL_PASSWORD=yourpassword
+   
+   # Optional: Proxy list (comma-separated ip:port:user:pass)
+   SCRAPE_PROXIES=ip1:port1:user1:pass1,ip2:port2:user2:pass2
    ```
-
-### Running Link Generation
-To run the super fast link generator and store results in the database:
-```bash
-cd link_generation
-python gsa_link_automation_fast.py
-```
-This script runs entirely automatically, validating and securely saving the links to both tracking `.xlsx` files and the PostgreSQL database using SQLModel.
 
 ## License
 Proprietary - internal use only.
