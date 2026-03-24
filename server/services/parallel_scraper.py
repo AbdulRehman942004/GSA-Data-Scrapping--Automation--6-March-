@@ -14,9 +14,11 @@ from services.scraping_service import GSAScrapingAutomation
 from services.rate_limiter import TokenBucketRateLimiter
 from settings import (
     EXCEL_FILE_PATH,
+    SCRAPE_DELAY_SECONDS,
     SCRAPE_MAX_REQUESTS_PER_MINUTE,
     SCRAPE_MAX_WORKERS,
     SCRAPE_NUM_WORKERS,
+    SCRAPE_PROXIES,
     SCRAPE_WORKER_MAX_RETRIES,
 )
 
@@ -98,15 +100,32 @@ class ParallelScrapingOrchestrator:
     """Coordinates multiple GSAScrapingAutomation workers."""
 
     def __init__(self, num_workers: int = 0):
-        self.num_workers = resolve_num_workers(num_workers)
+        self.proxies = list(SCRAPE_PROXIES)  # copy
         self.stop_event = threading.Event()
-        self.rate_limiter = TokenBucketRateLimiter(SCRAPE_MAX_REQUESTS_PER_MINUTE)
         self.tracker: ProgressTracker | None = None
         self._executor: ThreadPoolExecutor | None = None
-        logger.info(
-            f"Orchestrator initialized: {self.num_workers} workers, "
-            f"{SCRAPE_MAX_REQUESTS_PER_MINUTE} max req/min"
-        )
+
+        if self.proxies:
+            # With proxies: each worker has its own IP → no global rate limiter needed.
+            # Auto-scale workers to match available proxies if not explicitly set.
+            if num_workers > 0:
+                self.num_workers = min(num_workers, len(self.proxies), SCRAPE_MAX_WORKERS)
+            else:
+                self.num_workers = min(len(self.proxies), SCRAPE_MAX_WORKERS)
+            self.rate_limiter = None  # each worker does its own per-IP delay
+            logger.info(
+                f"Orchestrator initialized: {self.num_workers} workers with "
+                f"{len(self.proxies)} proxies (each IP rate-limited independently at "
+                f"{SCRAPE_DELAY_SECONDS}s/request)"
+            )
+        else:
+            # No proxies: single IP, global rate limiter
+            self.num_workers = resolve_num_workers(num_workers)
+            self.rate_limiter = TokenBucketRateLimiter(SCRAPE_MAX_REQUESTS_PER_MINUTE)
+            logger.info(
+                f"Orchestrator initialized: {self.num_workers} workers, "
+                f"single IP, {SCRAPE_MAX_REQUESTS_PER_MINUTE} max req/min"
+            )
 
     def stop(self):
         """Signal all workers to stop."""
@@ -219,12 +238,16 @@ class ParallelScrapingOrchestrator:
         def on_complete(part_number: str, success: bool):
             self.tracker.record(worker_id, part_number, success)
 
+        # Assign proxy round-robin (if available)
+        proxy = self.proxies[worker_id % len(self.proxies)] if self.proxies else None
+
         automation = GSAScrapingAutomation(
             excel_file_path=EXCEL_FILE_PATH,
             stop_event=self.stop_event,
-            rate_limiter=self.rate_limiter,
+            rate_limiter=self.rate_limiter,  # None when proxies are used
             on_row_complete=on_complete,
             worker_id=worker_id,
+            proxy=proxy,
         )
 
         while retries < SCRAPE_WORKER_MAX_RETRIES:

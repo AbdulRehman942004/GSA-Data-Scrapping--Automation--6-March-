@@ -23,6 +23,7 @@ from database.db import get_engine
 from database.repository import get_link_by_part_number, mark_link_scraped, upsert_scraped_data
 from settings import SCRAPE_DELAY_SECONDS, PAGE_LOAD_TIMEOUT, EXCEL_FILE_PATH
 from services.manufacturer_normalizer import ManufacturerNormalizer
+from services.proxy_auth import create_proxy_auth_extension
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -33,7 +34,7 @@ EXCEL_FILE = EXCEL_FILE_PATH
 
 class GSAScrapingAutomation:
     def __init__(self, excel_file_path, stop_event=None, rate_limiter=None,
-                 on_row_complete=None, worker_id=None):
+                 on_row_complete=None, worker_id=None, proxy=None):
         self.excel_file_path = excel_file_path
         self.driver = None
         self.wait = None
@@ -47,6 +48,8 @@ class GSAScrapingAutomation:
         self._rate_limiter = rate_limiter
         self._on_row_complete = on_row_complete
         self._worker_id = worker_id
+        self._proxy = proxy  # {"host", "port", "user", "pass"} or None
+        self._proxy_ext_path = None  # temp file cleanup
 
     @property
     def stop_requested(self):
@@ -128,7 +131,6 @@ class GSAScrapingAutomation:
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument("--disable-extensions")
         chrome_options.add_argument("--disable-plugins")
         chrome_options.add_argument("--disable-images")
         chrome_options.add_argument("--disable-web-security")
@@ -154,6 +156,25 @@ class GSAScrapingAutomation:
                 "media_stream": 2,
             }
         })
+
+        # Proxy configuration
+        if self._proxy:
+            proxy = self._proxy
+            if proxy.get("user"):
+                # Authenticated proxy → needs Chrome extension
+                # NOTE: --disable-extensions must NOT be set for this to work
+                self._proxy_ext_path = create_proxy_auth_extension(
+                    proxy["host"], proxy["port"], proxy["user"], proxy["pass"]
+                )
+                chrome_options.add_extension(self._proxy_ext_path)
+                logger.info(f"[W{self._worker_id}] Using proxy: {proxy['host']}:{proxy['port']} (authenticated)")
+            else:
+                # Unauthenticated proxy → simple flag
+                chrome_options.add_argument("--disable-extensions")
+                chrome_options.add_argument(f"--proxy-server=http://{proxy['host']}:{proxy['port']}")
+                logger.info(f"[W{self._worker_id}] Using proxy: {proxy['host']}:{proxy['port']}")
+        else:
+            chrome_options.add_argument("--disable-extensions")
 
         self.driver = webdriver.Chrome(options=chrome_options)
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
