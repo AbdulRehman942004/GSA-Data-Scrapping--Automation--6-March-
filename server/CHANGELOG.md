@@ -14,7 +14,7 @@ All notable changes to this project will be documented in this file.
 - Random scrolling and pause injection to emulate genuine human interaction.
 - `SCRAPE_PROXIES` array tracking capability to bypass static constraints.
 
-## v1.0.0 - 2026-03-14
+    ## v1.0.0 - 2026-03-14
 
 ### Added
 - Link generation scripts for constructing deterministic GSA Advantage search URLs.
