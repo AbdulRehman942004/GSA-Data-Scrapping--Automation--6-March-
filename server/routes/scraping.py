@@ -3,7 +3,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 import state
-from scraping.gsa_scraping_automation import GSAScrapingAutomation
+from services.scraping_service import GSAScrapingAutomation
 from settings import EXCEL_FILE_PATH, MFR_MAPPING_FILE_PATH
 
 router = APIRouter(prefix="/api/scrape", tags=["Scraping"])

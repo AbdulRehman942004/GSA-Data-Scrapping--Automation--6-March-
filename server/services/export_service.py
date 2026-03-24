@@ -5,7 +5,7 @@ import io
 from datetime import datetime
 
 # Ensure the root project dir is in sys.path so we can import modules
-sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.db import get_engine
 from settings import EXCEL_FILE_PATH
 

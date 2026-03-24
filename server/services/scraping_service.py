@@ -22,7 +22,7 @@ from database.models import GSALink, GSAScrapedData
 from database.db import get_engine
 from database.repository import get_link_by_part_number, mark_link_scraped, upsert_scraped_data
 from settings import SCRAPE_DELAY_SECONDS, PAGE_LOAD_TIMEOUT, EXCEL_FILE_PATH, MFR_MAPPING_FILE_PATH
-from manufacturer_normalizer import ManufacturerNormalizer
+from services.manufacturer_normalizer import ManufacturerNormalizer
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

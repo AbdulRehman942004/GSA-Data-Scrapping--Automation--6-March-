@@ -5,7 +5,7 @@ from sqlmodel import Session
 import state
 from database.models import GSALink, GSAScrapedData
 from database.db import get_engine
-from export_to_excel import export_to_excel
+from services.export_service import export_to_excel
 
 router = APIRouter(tags=["Status & Export"])
 
