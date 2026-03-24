@@ -1,22 +1,15 @@
 import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel
 
 import state
 from services.scraping_service import GSAScrapingAutomation
 from settings import EXCEL_FILE_PATH, MFR_MAPPING_FILE_PATH
+from models.requests import ScrapingRequest
 
 router = APIRouter(prefix="/api/scrape", tags=["Scraping"])
 logger = logging.getLogger(__name__)
 
 VALID_MODES = {"test", "full", "missing", "custom"}
-
-
-class ScrapingRequest(BaseModel):
-    mode: str = "test"       # "test" | "full" | "missing" | "custom"
-    item_limit: int = 3
-    start_row: int = 1
-    end_row: int = 100
 
 
 def _validate_range(start_row: int, end_row: int) -> None:

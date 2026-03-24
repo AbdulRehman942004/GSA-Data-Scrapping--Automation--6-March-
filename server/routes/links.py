@@ -1,22 +1,15 @@
 import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel
 
 import state
 from services.link_service import GSALinkAutomationFast
 from settings import EXCEL_FILE_PATH
+from models.requests import LinkGenerationRequest
 
 router = APIRouter(prefix="/api/links", tags=["Link Generation"])
 logger = logging.getLogger(__name__)
 
 VALID_MODES = {"test", "full", "custom"}
-
-
-class LinkGenerationRequest(BaseModel):
-    mode: str = "test"       # "test" | "full" | "custom"
-    item_limit: int = 5
-    start_row: int = 1
-    end_row: int = 100
 
 
 def _validate_range(start_row: int, end_row: int) -> None:
