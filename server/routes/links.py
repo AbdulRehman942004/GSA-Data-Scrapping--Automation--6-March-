@@ -3,7 +3,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 import state
-from link_generation.gsa_link_automation_fast import GSALinkAutomationFast
+from services.link_service import GSALinkAutomationFast
 from settings import EXCEL_FILE_PATH
 
 router = APIRouter(prefix="/api/links", tags=["Link Generation"])
