@@ -562,12 +562,13 @@ class GSAScrapingAutomation:
                 eta_h = (total - offset) * avg / 3600
                 logger.info(f"{wid}Avg: {avg:.1f}s/row | ETA: {eta_h:.1f}h")
 
-                # Per-worker delay (on top of global rate limiter)
-                if self._stop_event is not None:
-                    # Use event-aware wait so stop signal interrupts the sleep
-                    self._stop_event.wait(timeout=SCRAPE_DELAY_SECONDS)
-                else:
-                    time.sleep(SCRAPE_DELAY_SECONDS)
+                # Delay between requests: rate limiter handles pacing in
+                # parallel mode; standalone mode falls back to a simple sleep.
+                if not self._rate_limiter:
+                    if self._stop_event is not None:
+                        self._stop_event.wait(timeout=SCRAPE_DELAY_SECONDS)
+                    else:
+                        time.sleep(SCRAPE_DELAY_SECONDS)
 
             except Exception as e:
                 failed += 1

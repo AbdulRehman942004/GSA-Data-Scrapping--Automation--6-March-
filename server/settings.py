@@ -38,5 +38,5 @@ PAGE_LOAD_TIMEOUT: int = int(os.getenv("PAGE_LOAD_TIMEOUT", "15"))
 # 0 = auto-detect: min(3, cpu_count // 2), each Chrome instance ~300-500 MB RAM
 SCRAPE_NUM_WORKERS: int = int(os.getenv("SCRAPE_NUM_WORKERS", "0"))
 SCRAPE_MAX_WORKERS: int = int(os.getenv("SCRAPE_MAX_WORKERS", "5"))
-SCRAPE_MAX_REQUESTS_PER_MINUTE: int = int(os.getenv("SCRAPE_MAX_REQUESTS_PER_MINUTE", "10"))
+SCRAPE_MAX_REQUESTS_PER_MINUTE: int = int(os.getenv("SCRAPE_MAX_REQUESTS_PER_MINUTE", "30"))
 SCRAPE_WORKER_MAX_RETRIES: int = int(os.getenv("SCRAPE_WORKER_MAX_RETRIES", "3"))
