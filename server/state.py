@@ -13,3 +13,6 @@ is_scraping_running: bool = False
 
 active_link_automation = None
 active_scraping_automation = None
+
+# Parallel scraping
+parallel_orchestrator = None

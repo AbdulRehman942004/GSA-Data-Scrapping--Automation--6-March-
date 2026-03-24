@@ -32,7 +32,8 @@ EXCEL_FILE = EXCEL_FILE_PATH
 
 
 class GSAScrapingAutomation:
-    def __init__(self, excel_file_path):
+    def __init__(self, excel_file_path, stop_event=None, rate_limiter=None,
+                 on_row_complete=None, worker_id=None):
         self.excel_file_path = excel_file_path
         self.driver = None
         self.wait = None
@@ -40,11 +41,25 @@ class GSAScrapingAutomation:
         self._compile_regex_patterns()
         self.engine = None
         self._setup_db()
-        self.stop_requested = False
+        # Parallel-aware stop: shared threading.Event or fallback to boolean
+        self._stop_event = stop_event
+        self._stop_flag = False
+        self._rate_limiter = rate_limiter
+        self._on_row_complete = on_row_complete
+        self._worker_id = worker_id
+
+    @property
+    def stop_requested(self):
+        if self._stop_event is not None:
+            return self._stop_event.is_set()
+        return self._stop_flag
 
     def stop(self):
         """Signal the automation to stop as soon as possible"""
-        self.stop_requested = True
+        if self._stop_event is not None:
+            self._stop_event.set()
+        else:
+            self._stop_flag = True
         logger.info("Stop signal received. Finishing current task...")
 
     def _setup_db(self):
@@ -492,11 +507,13 @@ class GSAScrapingAutomation:
         """Core scraping loop - processes a list of integer DataFrame indices."""
         total = len(indices)
         successful = 0
+        failed = 0
         start_time = time.time()
+        wid = f"[W{self._worker_id}] " if self._worker_id is not None else ""
 
         for offset, i in enumerate(indices, 1):
             if self.stop_requested:
-                logger.warning("Stop requested. Exiting loop.")
+                logger.warning(f"{wid}Stop requested. Exiting loop.")
                 break
             try:
                 manufacturer = df.at[i, column_mapping['manufacturer']]
@@ -504,40 +521,62 @@ class GSAScrapingAutomation:
 
                 link_record = self._get_link_from_db(part_number)
                 if not link_record or not link_record.gsa_link:
-                    logger.warning(f"Row {i + 1}: No DB URL for {part_number}")
+                    logger.warning(f"{wid}Row {i + 1}: No DB URL for {part_number}")
+                    if self._on_row_complete:
+                        self._on_row_complete(part_number, False)
                     continue
                 if link_record.is_scraped:
-                    logger.info(f"Row {i + 1}: Skipping {part_number} (already scraped)")
+                    logger.info(f"{wid}Row {i + 1}: Skipping {part_number} (already scraped)")
+                    if self._on_row_complete:
+                        self._on_row_complete(part_number, True)
                     continue
 
                 gsa_url = link_record.gsa_link
-                print(f"\nProgress: {offset}/{total} (Row {i + 1}) - {part_number}")
-                t0 = time.time()
+                logger.info(f"{wid}Progress: {offset}/{total} (Row {i + 1}) - {part_number}")
 
+                # Global rate limiting across all workers
+                if self._rate_limiter:
+                    self._rate_limiter.acquire()
+
+                t0 = time.time()
                 products_data = self.scrape_gsa_page(gsa_url, manufacturer)
                 elapsed = time.time() - t0
 
+                success = False
                 if products_data:
                     successful += 1
+                    success = True
                     self.save_results_to_db(part_number, products_data)
-                    print(f"  SUCCESS: {len(products_data)} products ({elapsed:.1f}s)")
+                    logger.info(f"{wid}SUCCESS: {len(products_data)} products ({elapsed:.1f}s)")
                 else:
-                    print(f"  WARNING: No matches ({elapsed:.1f}s)")
+                    failed += 1
+                    logger.warning(f"{wid}No matches for {part_number} ({elapsed:.1f}s)")
 
                 self._mark_link_scraped(part_number)
+
+                if self._on_row_complete:
+                    self._on_row_complete(part_number, success)
 
                 total_elapsed = time.time() - start_time
                 avg = total_elapsed / offset
                 eta_h = (total - offset) * avg / 3600
-                print(f"  Avg: {avg:.1f}s/row | ETA: {eta_h:.1f}h")
+                logger.info(f"{wid}Avg: {avg:.1f}s/row | ETA: {eta_h:.1f}h")
 
-                time.sleep(SCRAPE_DELAY_SECONDS)
+                # Per-worker delay (on top of global rate limiter)
+                if self._stop_event is not None:
+                    # Use event-aware wait so stop signal interrupts the sleep
+                    self._stop_event.wait(timeout=SCRAPE_DELAY_SECONDS)
+                else:
+                    time.sleep(SCRAPE_DELAY_SECONDS)
 
             except Exception as e:
-                logger.error(f"Error on row {i + 1}: {str(e)}")
+                failed += 1
+                logger.error(f"{wid}Error on row {i + 1}: {str(e)}")
+                if self._on_row_complete:
+                    self._on_row_complete(str(i), False)
 
         total_time = time.time() - start_time
-        print(f"\nDone! {successful}/{total} successful in {total_time / 60:.1f} min")
+        logger.info(f"{wid}Done! {successful}/{total} successful, {failed} failed in {total_time / 60:.1f} min")
         return successful
 
     def identify_missing_rows(self, df):
@@ -650,7 +689,7 @@ def main():
     print(f"Output:       PostgreSQL DB (gsa_scraped_data table)")
     print("=" * 60)
 
-    automation = GSAScrapingAutomation(EXCEL_FILE, MFR_MAPPING_FILE)
+    automation = GSAScrapingAutomation(EXCEL_FILE)
 
     while True:
         print("\nChoose automation mode:")

@@ -2,8 +2,7 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 import state
-from services.scraping_service import GSAScrapingAutomation
-from settings import EXCEL_FILE_PATH
+from services.parallel_scraper import ParallelScrapingOrchestrator
 from models.requests import ScrapingRequest
 
 router = APIRouter(prefix="/api/scrape", tags=["Scraping"])
@@ -22,19 +21,19 @@ def _validate_range(start_row: int, end_row: int) -> None:
 
 
 def _run_scraping(req: ScrapingRequest) -> None:
-    """Background task: runs scraping and resets state when done."""
+    """Background task: runs parallel scraping and resets state when done."""
     try:
-        automation = GSAScrapingAutomation(EXCEL_FILE_PATH)
-        state.active_scraping_automation = automation
+        orchestrator = ParallelScrapingOrchestrator(num_workers=req.num_workers)
+        state.parallel_orchestrator = orchestrator
 
         if req.mode == "test":
-            automation.run_scraping_test_mode(req.item_limit)
+            orchestrator.run_test(req.item_limit)
         elif req.mode == "full":
-            automation.run_scraping_full()
+            orchestrator.run_full()
         elif req.mode == "missing":
-            automation.run_scraping_missing_only()
+            orchestrator.run_missing()
         elif req.mode == "custom":
-            automation.run_scraping_custom_range(req.start_row, req.end_row)
+            orchestrator.run_custom_range(req.start_row, req.end_row)
 
     except Exception as e:
         logger.error(f"Scraping background task error: {e}")
@@ -42,6 +41,7 @@ def _run_scraping(req: ScrapingRequest) -> None:
         with state.state_lock:
             state.is_scraping_running = False
             state.active_scraping_automation = None
+            state.parallel_orchestrator = None
 
 
 @router.post("/start")
@@ -64,6 +64,9 @@ async def start_scraping(req: ScrapingRequest, background_tasks: BackgroundTasks
 
 @router.post("/stop")
 async def stop_scrape():
+    if state.parallel_orchestrator:
+        state.parallel_orchestrator.stop()
+        return {"status": "stopping", "message": "Stop signal sent to all workers."}
     if state.active_scraping_automation:
         state.active_scraping_automation.stop()
         return {"status": "stopping", "message": "Scraping stop signal sent."}

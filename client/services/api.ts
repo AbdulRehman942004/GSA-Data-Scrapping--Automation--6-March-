@@ -14,6 +14,27 @@ export interface ScrapingRequest {
   item_limit?: number;
   start_row?: number;
   end_row?: number;
+  num_workers?: number;
+}
+
+export interface WorkerStatus {
+  id: number;
+  completed: number;
+  current_part: string;
+  status: string;
+}
+
+export interface ScrapingProgress {
+  total: number;
+  completed: number;
+  successful: number;
+  failed: number;
+  active_workers: number;
+  num_workers: number;
+  elapsed_seconds: number;
+  avg_seconds_per_row: number;
+  estimated_remaining_seconds: number;
+  workers: WorkerStatus[];
 }
 
 export interface DatabaseStatus {
@@ -26,6 +47,7 @@ export interface AppStatus {
   is_link_generation_running: boolean;
   is_scraping_running: boolean;
   database: DatabaseStatus;
+  scraping_progress: ScrapingProgress | null;
 }
 
 const api = axios.create({

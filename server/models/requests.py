@@ -13,3 +13,4 @@ class ScrapingRequest(BaseModel):
     item_limit: int = 3
     start_row: int = 1
     end_row: int = 100
+    num_workers: int = 0     # 0 = auto-detect based on CPU

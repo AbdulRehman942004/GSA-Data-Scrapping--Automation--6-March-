@@ -13,6 +13,7 @@ export default function Dashboard() {
   // Global Test Mode State
   const [isTestMode, setIsTestMode] = useState(true);
   const [itemLimit, setItemLimit] = useState(5);
+  const [numWorkers, setNumWorkers] = useState(0);
   const [isExporting, setIsExporting] = useState(false);
 
   const toggleTestMode = () => {
@@ -79,8 +80,9 @@ export default function Dashboard() {
   const handleScraping = async () => {
     try {
       const mode = isTestMode ? 'test' : 'full';
-      toast.loading(`Initiating ${isTestMode ? 'Test' : 'Full'} Selenium Scraper...`, { id: 'scrape' });
-      await api.startScraping({ mode, item_limit: isTestMode ? itemLimit : undefined });
+      const workers = numWorkers > 0 ? numWorkers : undefined;
+      toast.loading(`Initiating ${isTestMode ? 'Test' : 'Full'} Selenium Scraper${workers ? ` (${workers} workers)` : ''}...`, { id: 'scrape' });
+      await api.startScraping({ mode, item_limit: isTestMode ? itemLimit : undefined, num_workers: workers });
       toast.success(`Selenium Scraping (${mode}) queued successfully!`, { id: 'scrape' });
       fetchStatus();
     } catch (err: any) {
@@ -285,17 +287,17 @@ export default function Dashboard() {
             </div>
 
             <div className="space-y-4 relative z-10">
-              
+
               {!isTestMode ? (
                  <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl text-slate-600 text-sm font-medium flex items-center gap-3">
                    <Bot className="w-5 h-5 text-slate-400" />
-                   Fully configured for massive unthrottled Selenium price scraping.
+                   Fully configured for massive parallel Selenium price scraping.
                  </div>
               ) : (
                 <div className="flex flex-col gap-2">
                   <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Test Sample Limit</label>
-                  <input 
-                    type="number" 
+                  <input
+                    type="number"
                     value={itemLimit}
                     onChange={(e) => setItemLimit(Number(e.target.value))}
                     min={1} max={100}
@@ -304,8 +306,31 @@ export default function Dashboard() {
                 </div>
               )}
 
+              {/* Worker Count */}
+              <div className="flex flex-col gap-2">
+                <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Parallel Workers</label>
+                <select
+                  value={numWorkers}
+                  onChange={(e) => setNumWorkers(Number(e.target.value))}
+                  disabled={status?.is_scraping_running}
+                  className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-emerald-500/50 shadow-sm transition-all disabled:opacity-50"
+                >
+                  <option value={0}>Auto-detect</option>
+                  <option value={1}>1 Worker</option>
+                  <option value={2}>2 Workers</option>
+                  <option value={3}>3 Workers</option>
+                  <option value={4}>4 Workers</option>
+                  <option value={5}>5 Workers</option>
+                </select>
+              </div>
+
+              {/* Live Progress */}
+              {status?.scraping_progress && status.is_scraping_running && (
+                <ScrapingProgressPanel progress={status.scraping_progress} />
+              )}
+
                 <div className="flex gap-2 mt-4">
-                  <button 
+                  <button
                     onClick={handleScraping}
                     disabled={status?.is_scraping_running || !!error}
                     className="flex-1 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:hover:bg-emerald-600 text-white font-semibold px-4 py-3 rounded-xl transition-all shadow-md active:scale-[0.98]"
@@ -318,7 +343,7 @@ export default function Dashboard() {
                   </button>
 
                   {status?.is_scraping_running && (
-                    <button 
+                    <button
                       onClick={handleStopScraping}
                       className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 font-bold px-6 py-3 rounded-xl transition-all active:scale-95"
                       title="Forcibly stop scraping"
@@ -377,6 +402,56 @@ function StatCard({ title, value, icon, color, bg }: { title: string, value?: nu
         ) : (
           <span className="text-4xl font-black tracking-tight text-slate-800">{value.toLocaleString()}</span>
         )}
+      </div>
+    </div>
+  );
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.round((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+function ScrapingProgressPanel({ progress }: { progress: api.ScrapingProgress }) {
+  const pct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+
+  return (
+    <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
+      {/* Progress bar */}
+      <div className="w-full h-2.5 bg-emerald-100 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-emerald-500 rounded-full transition-all duration-1000 ease-in-out"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+
+      {/* Stats row */}
+      <div className="flex flex-wrap items-center justify-between text-xs font-semibold text-emerald-800 gap-2">
+        <span>{progress.completed.toLocaleString()} / {progress.total.toLocaleString()} rows ({pct}%)</span>
+        <span>{progress.active_workers} / {progress.num_workers} workers active</span>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between text-xs text-emerald-700 gap-2">
+        <span>{progress.successful.toLocaleString()} matched &middot; {progress.failed.toLocaleString()} failed</span>
+        <span>
+          {progress.avg_seconds_per_row > 0 && `${progress.avg_seconds_per_row}s/row`}
+          {progress.estimated_remaining_seconds > 0 && ` · ETA: ${formatDuration(progress.estimated_remaining_seconds)}`}
+        </span>
+      </div>
+
+      {/* Per-worker breakdown */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 pt-1">
+        {progress.workers.map((w) => (
+          <div key={w.id} className="bg-white/60 border border-emerald-100 rounded-lg px-2.5 py-1.5 text-xs">
+            <div className="font-bold text-emerald-800">Worker {w.id + 1}</div>
+            <div className="text-emerald-600 truncate">
+              {w.completed} done · <span className="capitalize">{w.status}</span>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

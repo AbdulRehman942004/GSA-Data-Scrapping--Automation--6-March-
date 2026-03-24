@@ -26,6 +26,10 @@ async def get_status():
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": f"DB Error: {str(e)}"})
 
+    scraping_progress = None
+    if state.parallel_orchestrator:
+        scraping_progress = state.parallel_orchestrator.progress_snapshot()
+
     return {
         "is_link_generation_running": state.is_link_generation_running,
         "is_scraping_running": state.is_scraping_running,
@@ -34,6 +38,7 @@ async def get_status():
             "total_successfully_scraped_links_count": total_scraped_links,
             "total_scraped_data_records": total_scraped_records,
         },
+        "scraping_progress": scraping_progress,
     }
 
 
