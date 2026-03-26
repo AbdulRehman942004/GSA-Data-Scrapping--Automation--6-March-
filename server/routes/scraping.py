@@ -2,6 +2,8 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 import state
+from database.db import get_engine
+from database.repository import get_imported_parts_count
 from services.parallel_scraper import ParallelScrapingOrchestrator
 from models.requests import ScrapingRequest
 
@@ -52,6 +54,11 @@ async def start_scraping(req: ScrapingRequest, background_tasks: BackgroundTasks
         _validate_range(req.start_row, req.end_row)
     if req.item_limit < 1:
         raise HTTPException(status_code=422, detail="item_limit must be >= 1.")
+
+    # Ensure data has been imported
+    engine = get_engine()
+    if get_imported_parts_count(engine) == 0:
+        raise HTTPException(status_code=400, detail="No data imported. Please upload an Excel file first.")
 
     with state.state_lock:
         if state.is_scraping_running:

@@ -3,7 +3,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from sqlmodel import Session
 
 import state
-from database.models import GSALink, GSAScrapedData
+from database.models import GSALink, GSAScrapedData, ImportedPart
 from database.db import get_engine
 from services.export_service import export_to_excel
 
@@ -20,9 +20,17 @@ async def get_status():
     engine = get_engine()
     try:
         with Session(engine) as session:
-            total_links = session.query(GSALink).count()
-            total_scraped_links = session.query(GSALink).filter(GSALink.is_scraped == True).count()
-            total_scraped_records = session.query(GSAScrapedData).count()
+            imported_count = session.query(ImportedPart).count()
+
+            if imported_count == 0:
+                # No import yet → everything is zero
+                total_links = 0
+                total_scraped_links = 0
+                total_scraped_records = 0
+            else:
+                total_links = session.query(GSALink).count()
+                total_scraped_links = session.query(GSALink).filter(GSALink.is_scraped == True).count()
+                total_scraped_records = session.query(GSAScrapedData).count()
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": f"DB Error: {str(e)}"})
 

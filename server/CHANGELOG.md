@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## v3.0.0 - 2026-03-27
+
+### Added
+- Dynamic Excel file upload functionality (.xlsx/.csv) for updating scraper targets.
+- File parsing service to extract spreadsheet rows and dynamically map them to the database.
+- Data validation logic to ensure uploaded files match the required column structure before database insertion.
+- Database batch insertion logic to store the newly uploaded targets for the scraper to read.
+
 ## v2.0.0 - 2026-03-24
 
 ### Changed
@@ -14,7 +22,7 @@ All notable changes to this project will be documented in this file.
 - Random scrolling and pause injection to emulate genuine human interaction.
 - `SCRAPE_PROXIES` array tracking capability to bypass static constraints.
 
-    ## v1.0.0 - 2026-03-14
+## v1.0.0 - 2026-03-14
 
 ### Added
 - Link generation scripts for constructing deterministic GSA Advantage search URLs.

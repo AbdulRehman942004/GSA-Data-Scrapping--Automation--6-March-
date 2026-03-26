@@ -83,6 +83,24 @@ export const stopScraping = async () => {
 };
 
 
+export interface ImportStatus {
+  imported_parts_count: number;
+}
+
+export const uploadExcel = async (file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await api.post('/api/import', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return response.data;
+};
+
+export const getImportStatus = async (): Promise<ImportStatus> => {
+  const response = await api.get<ImportStatus>('/api/import/status');
+  return response.data;
+};
+
 export const downloadExport = async () => {
   // Use axios instead of window location so we can await the download completion for loading states
   const response = await api.get('/api/export', { responseType: 'blob' });

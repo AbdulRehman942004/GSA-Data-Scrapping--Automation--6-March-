@@ -21,7 +21,7 @@ from sqlmodel import Session, SQLModel, select
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.models import GSALink, GSAScrapedData
 from database.db import get_engine
-from database.repository import get_link_by_part_number, mark_link_scraped, upsert_scraped_data
+from database.repository import get_link_by_part_number, mark_link_scraped, upsert_scraped_data, get_all_imported_parts
 from settings import SCRAPE_DELAY_SECONDS, PAGE_LOAD_TIMEOUT, EXCEL_FILE_PATH
 from services.manufacturer_normalizer import ManufacturerNormalizer
 from services.proxy_auth import create_proxy_auth_extension
@@ -242,6 +242,24 @@ class GSAScrapingAutomation:
         except Exception as e:
             logger.error(f"Error reading Excel file: {str(e)}")
             return None, None
+
+    def read_data(self):
+        """Return (df, column_mapping) from imported_parts DB."""
+        if self.engine:
+            records = get_all_imported_parts(self.engine)
+            if records:
+                rows = [
+                    {"manufacturer": r.manufacturer or "", "part_number": r.part_number}
+                    for r in records
+                    if r.part_number
+                ]
+                df = pd.DataFrame(rows)
+                column_mapping = {"manufacturer": "manufacturer", "part_number": "part_number"}
+                logger.info(f"Loaded {len(df)} rows from imported_parts DB")
+                return df, column_mapping
+
+        logger.warning("No imported parts found. Please import an Excel file first.")
+        return None, None
 
     def scrape_gsa_page(self, gsa_url, target_manufacturer):
         """Scrape GSA page and return top 2 products matching the manufacturer"""

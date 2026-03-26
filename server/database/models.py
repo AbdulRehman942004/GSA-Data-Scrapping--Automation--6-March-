@@ -8,6 +8,14 @@ class GSALink(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     is_scraped: bool = Field(default=False)
 
+class ImportedPart(SQLModel, table=True):
+    __tablename__ = 'imported_parts'
+    id: int = Field(default=None, primary_key=True)
+    part_number: str = Field(index=True)
+    manufacturer: str = Field(default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class GSAScrapedData(SQLModel, table=True):
     __tablename__ = 'gsa_scraped_data'
     id: int = Field(default=None, primary_key=True)
