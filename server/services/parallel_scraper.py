@@ -141,26 +141,30 @@ class ParallelScrapingOrchestrator:
 
     # ── Run modes ─────────────────────────────────────────────────────
 
-    def run_test(self, item_limit: int):
+    def _load_data(self):
+        """Load data from imported_parts DB (preferred) or Excel fallback."""
         automation = GSAScrapingAutomation(EXCEL_FILE_PATH)
-        df, column_mapping = automation.read_excel_data()
+        df, column_mapping = automation.read_data()
+        return df, column_mapping
+
+    def run_test(self, item_limit: int):
+        df, column_mapping = self._load_data()
         if df is None:
             return False
         indices = list(df.head(item_limit).index)
         return self._dispatch(indices, df, column_mapping)
 
     def run_full(self):
-        automation = GSAScrapingAutomation(EXCEL_FILE_PATH)
-        df, column_mapping = automation.read_excel_data()
+        df, column_mapping = self._load_data()
         if df is None:
             return False
         return self._dispatch(list(df.index), df, column_mapping)
 
     def run_missing(self):
-        automation = GSAScrapingAutomation(EXCEL_FILE_PATH)
-        df, column_mapping = automation.read_excel_data()
+        df, column_mapping = self._load_data()
         if df is None:
             return False
+        automation = GSAScrapingAutomation(EXCEL_FILE_PATH)
         indices = automation.identify_missing_rows(df)
         if not indices:
             logger.info("All rows already scraped!")
@@ -168,8 +172,7 @@ class ParallelScrapingOrchestrator:
         return self._dispatch(indices, df, column_mapping)
 
     def run_custom_range(self, start_row: int, end_row: int):
-        automation = GSAScrapingAutomation(EXCEL_FILE_PATH)
-        df, column_mapping = automation.read_excel_data()
+        df, column_mapping = self._load_data()
         if df is None:
             return False
         start_idx = max(0, start_row - 1)

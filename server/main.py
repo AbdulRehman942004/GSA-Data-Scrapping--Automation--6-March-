@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from settings import ALLOWED_ORIGINS
-from routes import links, scraping, status
+from routes import imports, links, scraping, status
 
 app = FastAPI(
     title="GSA Scraper Automation API",
@@ -18,6 +18,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(imports.router)
 app.include_router(links.router)
 app.include_router(scraping.router)
 app.include_router(status.router)

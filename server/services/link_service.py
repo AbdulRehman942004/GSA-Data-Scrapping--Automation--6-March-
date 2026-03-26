@@ -13,7 +13,7 @@ import yaml
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.models import GSALink
 from database.db import get_engine
-from database.repository import upsert_link
+from database.repository import upsert_link, get_all_imported_parts
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -53,36 +53,49 @@ class GSALinkAutomationFast:
             logger.error(f"Failed to setup database: {str(e)}")
             self.engine = None
 
-    def read_excel_data(self):
-        """Read Excel file and extract part_number column"""
+    def read_data(self) -> list[str] | None:
+        """Return a list of part numbers from imported_parts DB."""
+        if self.engine:
+            records = get_all_imported_parts(self.engine)
+            if records:
+                part_numbers = [r.part_number for r in records if r.part_number]
+                logger.info(f"Loaded {len(part_numbers)} part numbers from imported_parts DB")
+                return part_numbers
+
+        logger.warning("No imported parts found. Please import an Excel file first.")
+        return None
+
+    def _read_part_numbers_from_excel(self) -> list[str] | None:
+        """Read part numbers from the static Excel file."""
         try:
             df = pd.read_excel(self.excel_file_path)
-            logger.info(f"Excel file loaded successfully. Columns: {list(df.columns)}")
+            for col in df.columns:
+                if col.strip().lower() == 'part_number':
+                    part_numbers = df[col].dropna().astype(str).tolist()
+                    logger.info(f"Loaded {len(part_numbers)} part numbers from Excel")
+                    return part_numbers
+            logger.error("Could not find 'part_number' column in the Excel file")
+            return None
+        except Exception as e:
+            logger.error(f"Error reading Excel file: {str(e)}")
+            return None
 
-            # Look for part_number column (case insensitive)
+    def read_excel_data(self):
+        """Read Excel file and extract part_number column (legacy, used by CLI)."""
+        try:
+            df = pd.read_excel(self.excel_file_path)
             part_number_column = None
             for col in df.columns:
                 if col.strip().lower() == 'part_number':
                     part_number_column = col
                     break
-
             if part_number_column is None:
-                logger.error("Could not find 'part_number' column in the Excel file")
                 return None, None
-
-            # Extract non-null values from the column
-            part_numbers = df[part_number_column].dropna().astype(str).tolist()
-            logger.info(f"Found {len(part_numbers)} part numbers to process")
-
-            # Ensure Links column exists and is string-compatible
             if 'Links' not in df.columns:
                 df['Links'] = ''
-                logger.info("Added 'Links' column to Excel")
             else:
                 df['Links'] = df['Links'].astype(object)
-
             return df, part_number_column
-
         except Exception as e:
             logger.error(f"Error reading Excel file: {str(e)}")
             return None, None
@@ -280,11 +293,10 @@ class GSALinkAutomationFast:
     def run_automation_fast(self):
         """Run link generation for all part numbers."""
         try:
-            df, col = self.read_excel_data()
-            if df is None:
-                logger.error("No data found in Excel file")
+            part_numbers = self.read_data()
+            if not part_numbers:
+                logger.error("No part numbers found")
                 return False
-            part_numbers = df[col].dropna().astype(str).tolist()
             logger.info(f"Full mode: processing {len(part_numbers)} part numbers")
             self._execute_link_loop(part_numbers)
             return True
@@ -295,11 +307,11 @@ class GSALinkAutomationFast:
     def run_automation_fast_test_mode(self, item_limit=5):
         """Run link generation for the first item_limit part numbers."""
         try:
-            df, col = self.read_excel_data()
-            if df is None:
-                logger.error("No data found in Excel file")
+            part_numbers = self.read_data()
+            if not part_numbers:
+                logger.error("No part numbers found")
                 return False
-            part_numbers = df[col].dropna().astype(str).tolist()[:item_limit]
+            part_numbers = part_numbers[:item_limit]
             logger.info(f"Test mode: processing {len(part_numbers)} part numbers")
             self._execute_link_loop(part_numbers)
             return True
@@ -310,12 +322,11 @@ class GSALinkAutomationFast:
     def run_automation_fast_custom_range(self, start_row, end_row):
         """Run link generation for a 1-based inclusive row range."""
         try:
-            df, col = self.read_excel_data()
-            if df is None:
-                logger.error("No data found in Excel file")
+            part_numbers = self.read_data()
+            if not part_numbers:
+                logger.error("No part numbers found")
                 return False
-            all_numbers = df[col].dropna().astype(str).tolist()
-            part_numbers = all_numbers[start_row - 1:end_row]
+            part_numbers = part_numbers[start_row - 1:end_row]
             if not part_numbers:
                 logger.error(f"No part numbers in range {start_row}-{end_row}")
                 return False

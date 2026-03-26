@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Bot, Database, Download, FileSpreadsheet, RefreshCw, CheckCircle, Search, Rocket, Loader2 } from 'lucide-react';
+import { Bot, Database, Download, FileSpreadsheet, RefreshCw, CheckCircle, Search, Rocket, Loader2, Upload } from 'lucide-react';
 import toast, { Toaster } from 'react-hot-toast';
 import * as api from '../services/api';
 
@@ -10,21 +10,11 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Global Test Mode State
-  const [isTestMode, setIsTestMode] = useState(true);
-  const [itemLimit, setItemLimit] = useState(5);
   const [numWorkers, setNumWorkers] = useState(0);
   const [isExporting, setIsExporting] = useState(false);
-
-  const toggleTestMode = () => {
-    const newMode = !isTestMode;
-    setIsTestMode(newMode);
-    if (newMode) {
-      toast("Test Mode Enabled: Automation runs are extremely limited to prevent heavy data usage.", { icon: '🧪', duration: 10000 });
-    } else {
-      toast("Full Mode Enabled: Automation sweeps will aggressively process the entire available dataset.", { icon: '🚀', duration: 10000 });
-    }
-  };
+  const [isUploading, setIsUploading] = useState(false);
+  const [importedCount, setImportedCount] = useState<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Refs to track previous status for completion detection
   const prevLinkRunning = useRef<boolean>(false);
@@ -46,6 +36,13 @@ export default function Dashboard() {
       prevScrapeRunning.current = data.is_scraping_running;
 
       setStatus(data);
+
+      // Fetch import status alongside
+      try {
+        const importData = await api.getImportStatus();
+        setImportedCount(importData.imported_parts_count);
+      } catch { /* ignore if endpoint not available */ }
+
       if (error) {
         toast.success("Server re-connected!");
         setError(null);
@@ -67,10 +64,9 @@ export default function Dashboard() {
 
   const handleLinkGeneration = async () => {
     try {
-      const mode = isTestMode ? 'test' : 'full';
-      toast.loading(`Initiating ${isTestMode ? 'Test' : 'Full'} Link Generation...`, { id: 'linkGen' });
-      await api.startLinkGeneration({ mode, item_limit: isTestMode ? itemLimit : undefined });
-      toast.success(`Link Generation (${mode}) queued successfully!`, { id: 'linkGen' });
+      toast.loading("Initiating Full Link Generation...", { id: 'linkGen' });
+      await api.startLinkGeneration({ mode: 'full' });
+      toast.success("Link Generation queued successfully!", { id: 'linkGen' });
       fetchStatus();
     } catch (err: any) {
       toast.error(`Error queueing Link Generation: ${err?.response?.data?.detail || err.message}`, { id: 'linkGen' });
@@ -79,11 +75,10 @@ export default function Dashboard() {
 
   const handleScraping = async () => {
     try {
-      const mode = isTestMode ? 'test' : 'full';
       const workers = numWorkers > 0 ? numWorkers : undefined;
-      toast.loading(`Initiating ${isTestMode ? 'Test' : 'Full'} Selenium Scraper${workers ? ` (${workers} workers)` : ''}...`, { id: 'scrape' });
-      await api.startScraping({ mode, item_limit: isTestMode ? itemLimit : undefined, num_workers: workers });
-      toast.success(`Selenium Scraping (${mode}) queued successfully!`, { id: 'scrape' });
+      toast.loading(`Initiating Full Selenium Scraper${workers ? ` (${workers} workers)` : ''}...`, { id: 'scrape' });
+      await api.startScraping({ mode: 'full', num_workers: workers });
+      toast.success("Selenium Scraping queued successfully!", { id: 'scrape' });
       fetchStatus();
     } catch (err: any) {
       toast.error(`Error queueing Scraping: ${err?.response?.data?.detail || err.message}`, { id: 'scrape' });
@@ -125,6 +120,24 @@ export default function Dashboard() {
     }
   };
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      setIsUploading(true);
+      toast.loading("Uploading and importing Excel data...", { id: 'import' });
+      const result = await api.uploadExcel(file);
+      setImportedCount(result.rows_imported);
+      toast.success(`Imported ${result.rows_imported.toLocaleString()} rows from ${result.filename}`, { id: 'import', duration: 5000 });
+      fetchStatus();
+    } catch (err: any) {
+      toast.error(`Import failed: ${err?.response?.data?.detail || err.message}`, { id: 'import' });
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans p-8 selection:bg-blue-500/30">
       <Toaster position="top-right" reverseOrder={false} />
@@ -142,22 +155,6 @@ export default function Dashboard() {
           </div>
           
           <div className="flex flex-wrap items-center gap-4">
-            {/* Native Topbar Toggle Switch */}
-            <button 
-              onClick={toggleTestMode} 
-              className="group flex items-center gap-2.5 px-3 py-1.5 border rounded-lg transition-all bg-white hover:bg-slate-50 border-slate-200 shadow-sm"
-              title="Toggle between testing a small batch of records vs full execution"
-            >
-              <div className={`relative flex items-center w-10 h-5 rounded-full transition-colors ${isTestMode ? 'bg-blue-500' : 'bg-slate-200'}`}>
-                <div className={`absolute w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform ${isTestMode ? 'translate-x-[22px]' : 'translate-x-1'}`} />
-              </div>
-              <span className={`text-sm font-semibold transition-colors ${isTestMode ? 'text-blue-600' : 'text-slate-600'}`}>
-                {isTestMode ? 'Test Mode Enabled' : 'Full Execution Ready'}
-              </span>
-            </button>
-            
-            <div className="hidden md:block w-px h-6 bg-slate-200" />
-            
             {/* Server Status Radar */}
             <div className="flex items-center gap-2">
               <span className="flex h-2.5 w-2.5 relative">
@@ -179,11 +176,18 @@ export default function Dashboard() {
         )}
 
         {/* Dynamic Database Statistics */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <StatCard 
-            title="Generated URL Links" 
-            value={status?.database.total_generated_links_count} 
-            icon={<Search className="w-5 h-5" />} 
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <StatCard
+            title="Imported Rows"
+            value={importedCount ?? 0}
+            icon={<Upload className="w-5 h-5" />}
+            color="text-amber-600"
+            bg="bg-amber-50 border border-amber-100"
+          />
+          <StatCard
+            title="Generated URL Links"
+            value={status?.database.total_generated_links_count}
+            icon={<Search className="w-5 h-5" />}
             color="text-blue-600"
             bg="bg-blue-50 border border-blue-100"
           />
@@ -203,6 +207,42 @@ export default function Dashboard() {
             color="text-purple-600"
             bg="bg-purple-50 border border-purple-100"
           />
+        </div>
+
+        {/* Excel Import Section */}
+        <div className="bg-white border border-slate-200 shadow-sm rounded-2xl p-6 relative overflow-hidden group">
+          <div className="absolute inset-0 bg-gradient-to-br from-amber-50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4 relative z-10">
+            <div>
+              <h2 className="text-xl font-bold flex items-center gap-2 text-slate-800">
+                <Upload className="w-5 h-5 text-amber-600" />
+                Import Excel Dataset
+              </h2>
+              <p className="text-slate-500 text-sm mt-1">
+                Upload an Excel file with <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs font-mono">part_number</code> and <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs font-mono">manufacturer</code> columns to use as the scraping source.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isUploading || status?.is_link_generation_running || status?.is_scraping_running}
+                className="whitespace-nowrap flex items-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 disabled:hover:bg-amber-500 text-white font-semibold px-5 py-3 rounded-xl transition-all shadow-md active:scale-[0.98]"
+              >
+                {isUploading ? (
+                  <><Loader2 className="w-5 h-5 animate-spin" /> Importing...</>
+                ) : (
+                  <><Upload className="w-5 h-5" /> Upload .XLSX</>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Process Controls */}
@@ -225,24 +265,11 @@ export default function Dashboard() {
             </div>
 
             <div className="space-y-4 relative z-10">
-              
-              {!isTestMode ? (
-                 <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl text-slate-600 text-sm font-medium flex items-center gap-3">
-                   <Rocket className="w-5 h-5 text-slate-400" />
-                   Fully configured for massive unthrottled url generation run.
-                 </div>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Test Sample Limit</label>
-                  <input 
-                    type="number" 
-                    value={itemLimit}
-                    onChange={(e) => setItemLimit(Number(e.target.value))}
-                    min={1} max={100}
-                    className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-blue-500/50 shadow-sm transition-all"
-                  />
-                </div>
-              )}
+
+              <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl text-slate-600 text-sm font-medium flex items-center gap-3">
+                <Rocket className="w-5 h-5 text-slate-400" />
+                Generates GSA Advantage URLs for all imported part numbers.
+              </div>
 
                 <div className="flex gap-2 mt-4">
                   <button 
@@ -288,23 +315,10 @@ export default function Dashboard() {
 
             <div className="space-y-4 relative z-10">
 
-              {!isTestMode ? (
-                 <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl text-slate-600 text-sm font-medium flex items-center gap-3">
-                   <Bot className="w-5 h-5 text-slate-400" />
-                   Fully configured for massive parallel Selenium price scraping.
-                 </div>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Test Sample Limit</label>
-                  <input
-                    type="number"
-                    value={itemLimit}
-                    onChange={(e) => setItemLimit(Number(e.target.value))}
-                    min={1} max={100}
-                    className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-emerald-500/50 shadow-sm transition-all"
-                  />
-                </div>
-              )}
+              <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl text-slate-600 text-sm font-medium flex items-center gap-3">
+                <Bot className="w-5 h-5 text-slate-400" />
+                Scrapes GSA Advantage pricing data for all imported part numbers.
+              </div>
 
               {/* Worker Count */}
               <div className="flex flex-col gap-2">

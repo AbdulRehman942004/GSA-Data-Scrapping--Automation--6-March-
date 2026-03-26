@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlmodel import Session, select
-from database.models import GSALink, GSAScrapedData
+from database.models import GSALink, GSAScrapedData, ImportedPart
 
 
 def get_link_by_part_number(engine, part_number):
@@ -69,3 +69,56 @@ def upsert_scraped_data(engine, part_number, products_data):
             session.add(rec)
         session.commit()
     return True
+
+
+# ── Imported parts ─────────────────────────────────────────────
+
+def clear_imported_parts(engine):
+    """Delete all rows from imported_parts (preparing for a fresh import)."""
+    with Session(engine) as session:
+        records = session.exec(select(ImportedPart)).all()
+        for rec in records:
+            session.delete(rec)
+        session.commit()
+
+
+def bulk_insert_imported_parts(engine, parts: list[dict]) -> int:
+    """Insert a list of {'part_number': ..., 'manufacturer': ...} dicts. Returns count."""
+    with Session(engine) as session:
+        for p in parts:
+            session.add(ImportedPart(
+                part_number=p["part_number"],
+                manufacturer=p.get("manufacturer", ""),
+            ))
+        session.commit()
+    return len(parts)
+
+
+def get_imported_parts_count(engine) -> int:
+    """Return how many rows are in imported_parts."""
+    with Session(engine) as session:
+        return len(session.exec(select(ImportedPart)).all())
+
+
+def get_all_imported_parts(engine) -> list[ImportedPart]:
+    """Return all imported part records."""
+    with Session(engine) as session:
+        return session.exec(select(ImportedPart).order_by(ImportedPart.id)).all()
+
+
+def clear_gsa_links(engine):
+    """Delete all rows from gsa_links."""
+    with Session(engine) as session:
+        records = session.exec(select(GSALink)).all()
+        for rec in records:
+            session.delete(rec)
+        session.commit()
+
+
+def clear_gsa_scraped_data(engine):
+    """Delete all rows from gsa_scraped_data."""
+    with Session(engine) as session:
+        records = session.exec(select(GSAScrapedData)).all()
+        for rec in records:
+            session.delete(rec)
+        session.commit()
