@@ -73,6 +73,8 @@ _COMPARE_BTN_SELECTORS = [
 ]
 
 _COMPARE_TABLE_ROW_SELECTORS = [
+    # Most specific: GSA vendor-list-table (confirmed from live page HTML)
+    (By.CSS_SELECTOR, "table.vendor-list-table tbody tr"),
     (By.CSS_SELECTOR, "app-ux-compare-sources table tbody tr"),
     (By.CSS_SELECTOR, ".compare-sources-modal table tbody tr"),
     (By.CSS_SELECTOR, "modal table tbody tr"),
@@ -469,7 +471,55 @@ class InternalLinkScraper:
     # ── Table row extraction ──────────────────────────────────────────────────
 
     def _find_compare_table_rows(self) -> list:
-        """Return all <tr> elements from the compare sources table."""
+        """
+        Return all <tr> elements from the main compare-sources table.
+
+        The modal often contains multiple tables (e.g. \"Currently Selected\" has its
+        own small table). Generic selectors like ``table tbody tr`` match that first
+        and yield a single row. We pick the table inside the visible modal that has
+        the most rows containing a dollar price.
+        """
+        modal = None
+        for sel in (".modal.show", ".modal.in", "[role='dialog']", ".modal"):
+            try:
+                el = self.driver.find_element(By.CSS_SELECTOR, sel)
+                if el.is_displayed():
+                    modal = el
+                    break
+            except NoSuchElementException:
+                continue
+
+        if modal is not None:
+            try:
+                tables = modal.find_elements(By.CSS_SELECTOR, "table")
+            except Exception:
+                tables = []
+            best_table = None
+            best_price_rows = 0
+            for table in tables:
+                try:
+                    trs = table.find_elements(By.CSS_SELECTOR, "tbody tr")
+                except Exception:
+                    continue
+                n_price = 0
+                for tr in trs:
+                    t = (tr.text or "").strip().lower()
+                    if re.search(r"\$\s*[\d,]+\.?\d*", t):
+                        n_price += 1
+                if n_price > best_price_rows:
+                    best_price_rows = n_price
+                    best_table = table
+
+            if best_table is not None and best_price_rows > 0:
+                rows = best_table.find_elements(By.CSS_SELECTOR, "tbody tr")
+                logger.info(
+                    f"{self._wid}Using compare table with {best_price_rows} price row(s), "
+                    f"{len(rows)} <tr> total in modal."
+                )
+                self._scroll_compare_table_for_lazy_rows(modal, best_table)
+                rows = best_table.find_elements(By.CSS_SELECTOR, "tbody tr")
+                return rows
+
         for sel_type, sel_val in _COMPARE_TABLE_ROW_SELECTORS:
             try:
                 rows = self.driver.find_elements(sel_type, sel_val)
@@ -484,6 +534,21 @@ class InternalLinkScraper:
         logger.warning(f"{self._wid}No compare table rows found with any selector.")
         return []
 
+    def _scroll_compare_table_for_lazy_rows(self, modal, table) -> None:
+        """Scroll the modal/table container so virtualized or lazy rows mount in the DOM."""
+        try:
+            self.driver.execute_script(
+                "arguments[0].scrollTop = arguments[0].scrollHeight;",
+                modal,
+            )
+            time.sleep(0.4)
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView(false);", table
+            )
+            time.sleep(0.3)
+        except Exception:
+            pass
+
     def _extract_all_compare_rows(
         self,
         mfr_name: Optional[str],
@@ -495,53 +560,42 @@ class InternalLinkScraper:
             return []
 
         results = []
-        _header_keywords = {
-            "price/unit", "contractor", "features", "deliv days",
-            "min order", "fob/shipping", "socio", "photo",
-        }
 
         for idx, tr in enumerate(table_rows):
-            # Stop once we have collected the required number of rows
             if len(results) >= MAX_ROWS_PER_LINK:
-                logger.info(f"{self._wid}Reached {MAX_ROWS_PER_LINK}-row limit — stopping table scan.")
+                logger.info(f"{self._wid}Reached {MAX_ROWS_PER_LINK}-row limit — stopping.")
                 break
 
             try:
-                row_text = tr.text.strip()
-                if not row_text:
+                # Skip header rows (class="sources-header") and empty rows
+                row_class = (tr.get_attribute("class") or "").lower()
+                if "sources-header" in row_class:
+                    continue
+                if not tr.text.strip():
                     continue
 
-                # Skip pure header rows
-                low_text = row_text.lower()
-                if any(kw in low_text for kw in _header_keywords):
-                    # Allow rows that ALSO contain a price (data rows can mention "ea")
-                    if not re.search(r'\$\s*[\d,]+\.?\d*', low_text):
-                        continue
-
-                price = self._parse_price(row_text)
-                unit = self._parse_unit(row_text)
-                contractor_name = self._get_contractor_link_text(tr)
-
-                if price is None and not contractor_name:
-                    continue  # blank / separator row
-
-                # Click contractor link to fetch the contract number
-                contract_number = self._fetch_contract_number(tr, contractor_name)
+                data = self._extract_row_data_from_dom(tr)
+                if data is None:
+                    # Fallback: text-based extraction
+                    data = self._extract_row_data_from_text(tr)
+                if data is None:
+                    continue
 
                 results.append({
                     "manufacturer_part_name": mfr_name,
                     "manufacturer_part_number": mfr_part_num,
-                    "price": price,
-                    "unit": unit,
-                    "contractor_name": contractor_name,
-                    "contract_number": contract_number,
-                    "row_order": len(results),  # sequential within this link
+                    "price": data["price"],
+                    "unit": data["unit"],
+                    "contractor_name": data["contractor_name"],
+                    "contract_number": data["contract_number"],
+                    "row_order": len(results),
                 })
 
                 logger.info(
                     f"{self._wid}Row {len(results)}/{MAX_ROWS_PER_LINK}: "
-                    f"price={price}, unit={unit}, contractor={contractor_name!r}, "
-                    f"contract#={contract_number!r}"
+                    f"price={data['price']}, unit={data['unit']!r}, "
+                    f"contractor={data['contractor_name']!r}, "
+                    f"contract#={data['contract_number']!r}"
                 )
 
             except Exception as e:
@@ -550,9 +604,130 @@ class InternalLinkScraper:
 
         return results
 
-    # ── price / unit / contractor parsing ────────────────────────────────────
+    # ── DOM-targeted row extraction ───────────────────────────────────────────
 
-    def _parse_price(self, text: str) -> Optional[float]:
+    def _extract_row_data_from_dom(self, tr) -> Optional[dict]:
+        """
+        Extract price, unit, contractor name and contract number using the
+        exact DOM structure confirmed from the live GSA vendor-list-table:
+
+          <tr class="otherItem | selectedItem">
+            <td>  Select button        </td>
+            <td>  <strong>$8.01</strong>   </td>   ← price
+            <td>  <a aria-label="Unit Definitions Modal EA">EA</a>  </td>  ← unit
+            <td>  feature icons         </td>
+            <td>  <a title="Link to contractor info"
+                     href="...?contractNumber=47QTCA22D00DM">
+                    PINE + PLUG LLC
+                  </a>
+                  OR (for the currently-selected row):
+                  <b>CONTRACTOR NAME</b>
+            </td>
+            …
+          </tr>
+
+        The contract number lives directly in the contractor <a> href query
+        parameter — no popup click required.
+        """
+        try:
+            # ── Price ─────────────────────────────────────────────────────────
+            price: Optional[float] = None
+            try:
+                strong_el = tr.find_element(By.CSS_SELECTOR, "td strong")
+                price = self._parse_price_text(strong_el.text)
+            except NoSuchElementException:
+                pass
+
+            # ── Unit ──────────────────────────────────────────────────────────
+            unit: Optional[str] = None
+            try:
+                unit_a = tr.find_element(
+                    By.CSS_SELECTOR,
+                    "a[aria-label^='Unit Definitions Modal']",
+                )
+                unit = unit_a.text.strip().upper() or None
+                if not unit:
+                    # Parse from aria-label: "Unit Definitions Modal EA"
+                    lbl = (unit_a.get_attribute("aria-label") or "").replace(
+                        "Unit Definitions Modal", ""
+                    ).strip()
+                    unit = lbl.upper() or None
+            except NoSuchElementException:
+                pass
+
+            # ── Contractor name + contract number from href ───────────────────
+            contractor_name: Optional[str] = None
+            contract_number: Optional[str] = None
+
+            try:
+                clink = tr.find_element(
+                    By.CSS_SELECTOR, "a[title='Link to contractor info']"
+                )
+                contractor_name = clink.text.strip() or None
+                href = clink.get_attribute("href") or ""
+                m = re.search(r'contractNumber=([A-Za-z0-9\-]+)', href)
+                if m:
+                    contract_number = m.group(1).strip()
+            except NoSuchElementException:
+                # "selectedItem" row shows the contractor in <b>, no link
+                try:
+                    b_el = tr.find_element(By.CSS_SELECTOR, "td b")
+                    contractor_name = b_el.text.strip() or None
+                except NoSuchElementException:
+                    pass
+                # Try to derive contract # from product-photo img src
+                if not contract_number:
+                    try:
+                        img = tr.find_element(
+                            By.CSS_SELECTOR, "app-product-photo img[src*='/products/']"
+                        )
+                        src = img.get_attribute("src") or ""
+                        m2 = re.search(r'/products/([^/]+)/', src)
+                        if m2:
+                            contract_number = m2.group(1)
+                    except NoSuchElementException:
+                        pass
+
+            if price is None and not contractor_name:
+                return None
+
+            return {
+                "price": price,
+                "unit": unit,
+                "contractor_name": contractor_name,
+                "contract_number": contract_number,
+            }
+
+        except Exception as e:
+            logger.debug(f"{self._wid}_extract_row_data_from_dom error: {e}")
+            return None
+
+    def _extract_row_data_from_text(self, tr) -> Optional[dict]:
+        """Text-based fallback parser for rows that don't match the DOM pattern."""
+        row_text = tr.text.strip()
+        if not row_text:
+            return None
+
+        price = self._parse_price_text(row_text)
+        unit = self._parse_unit_text(row_text)
+        contractor_name = self._get_contractor_link_text(tr)
+
+        if price is None and not contractor_name:
+            return None
+
+        # Try to get contract number from the href without clicking
+        contract_number = self._extract_contract_from_href(tr)
+
+        return {
+            "price": price,
+            "unit": unit,
+            "contractor_name": contractor_name,
+            "contract_number": contract_number,
+        }
+
+    # ── price / unit / contractor helpers ────────────────────────────────────
+
+    def _parse_price_text(self, text: str) -> Optional[float]:
         for pat in [
             r'\$\s*([\d,]+\.?\d*)',
             r'([\d,]+\.\d{2})\s*(?:EA|BX|BT|PK|DZ|CS|PR|SE|LO|KT)',
@@ -565,105 +740,50 @@ class InternalLinkScraper:
                     continue
         return None
 
-    def _parse_unit(self, text: str) -> Optional[str]:
-        # "$104.99 EA" — unit directly after price on the same line
+    # Keep legacy alias used by _extract_row_data_from_text
+    def _parse_price(self, text: str) -> Optional[float]:
+        return self._parse_price_text(text)
+
+    def _parse_unit_text(self, text: str) -> Optional[str]:
         for line in text.splitlines():
             m = re.search(r'\$\s*[\d,]+\.?\d*\s+([A-Za-z]{2,4})\b', line)
             if m:
                 return m.group(1).upper()
-            # "$104.99/EA"
             m = re.search(r'\$\s*[\d,]+\.?\d*\s*/\s*([A-Za-z]{1,4})\b', line)
             if m:
                 return m.group(1).upper()
         return None
 
+    # Keep legacy alias
+    def _parse_unit(self, text: str) -> Optional[str]:
+        return self._parse_unit_text(text)
+
     def _get_contractor_link_text(self, tr) -> Optional[str]:
-        """Return the text of the contractor <a> link inside this <tr>."""
+        """Return the text of the contractor <a> link inside this <tr> (fallback)."""
         _skip = {"select", "details", "more info", "info", "compare"}
         try:
             links = tr.find_elements(By.TAG_NAME, "a")
             for lnk in links:
                 txt = lnk.text.strip()
                 if txt and len(txt) > 2 and txt.lower() not in _skip:
-                    # Reject price-like strings
                     if not re.match(r'^\$?[\d,]+\.?\d*$', txt):
                         return txt
         except Exception:
             pass
         return None
 
-    # ── contract number (click contractor → popup) ────────────────────────────
-
-    def _fetch_contract_number(
-        self, tr, contractor_name: Optional[str]
-    ) -> Optional[str]:
-        """
-        Click the contractor link in the given row, read the contract number
-        from the resulting popup, then close it.
-        Returns None on failure so the row is still saved.
-        """
-        if not contractor_name:
-            return None
-
-        original_handles = set(self.driver.window_handles)
-
+    def _extract_contract_from_href(self, tr) -> Optional[str]:
+        """Extract contract number from the contractor link href (no click needed)."""
         try:
-            # Find the exact link element
-            contractor_link = None
-            for lnk in tr.find_elements(By.TAG_NAME, "a"):
-                if lnk.text.strip() == contractor_name:
-                    contractor_link = lnk
-                    break
-
-            if not contractor_link:
-                return None
-
-            self.driver.execute_script("arguments[0].scrollIntoView(true);", contractor_link)
-            time.sleep(0.3)
-            try:
-                contractor_link.click()
-            except ElementClickInterceptedException:
-                self.driver.execute_script("arguments[0].click();", contractor_link)
-
-            time.sleep(1.5)
-
-            # ── Case A: new tab / window opened ──────────────────────────────
-            new_handles = set(self.driver.window_handles) - original_handles
-            if new_handles:
-                new_handle = new_handles.pop()
-                self.driver.switch_to.window(new_handle)
-                time.sleep(1)
-                contract_num = self._read_contract_number_from_current_view()
-                self.driver.close()
-                self.driver.switch_to.window(list(original_handles)[0])
-                return contract_num
-
-            # ── Case B: modal/popup on the same page ─────────────────────────
-            contract_num = self._read_contract_number_from_current_view()
-            self._close_modal()
-            return contract_num
-
-        except Exception as e:
-            logger.warning(
-                f"{self._wid}Could not get contract# for {contractor_name!r}: {e}"
-            )
-            # Best-effort modal close so next row can still be processed
-            try:
-                self._close_modal()
-            except Exception:
-                pass
-            # If a new tab was opened and we crashed, switch back
-            try:
-                remaining_handles = set(self.driver.window_handles)
-                extra = remaining_handles - original_handles
-                for h in extra:
-                    self.driver.switch_to.window(h)
-                    self.driver.close()
-                if original_handles:
-                    self.driver.switch_to.window(list(original_handles)[0])
-            except Exception:
-                pass
-            return None
+            links = tr.find_elements(By.TAG_NAME, "a")
+            for lnk in links:
+                href = lnk.get_attribute("href") or ""
+                m = re.search(r'contractNumber=([A-Za-z0-9\-]+)', href)
+                if m:
+                    return m.group(1).strip()
+        except Exception:
+            pass
+        return None
 
     def _read_contract_number_from_current_view(self) -> Optional[str]:
         """
@@ -671,12 +791,38 @@ class InternalLinkScraper:
           - The contractor info modal overlay, or
           - A new page that opened after clicking the contractor link.
 
-        The contractor detail page / modal shows:
-            Contract:  47QTCA23D00CC
+        GSA often renders the contract # in a div with classes ``col-sm-6 text-sm-left``.
+        The contractor detail page / modal may also show: Contract: 47QTCA23D00CC
         """
         time.sleep(0.8)
 
-        # Try modal-scoped selectors first
+        # Primary: labeled layout column used on GSA contractor popups
+        try:
+            col_selectors = (
+                "div.col-sm-6.text-sm-left",
+                "div.text-sm-left.col-sm-6",
+                "div[class*='col-sm-6'][class*='text-sm-left']",
+            )
+            seen = set()
+            for css in col_selectors:
+                for el in self.driver.find_elements(By.CSS_SELECTOR, css):
+                    id_el = id(el)
+                    if id_el in seen:
+                        continue
+                    seen.add(id_el)
+                    txt = (el.text or "").strip()
+                    if not txt:
+                        continue
+                    cn = self._parse_contract_number(txt)
+                    if cn:
+                        logger.info(
+                            f"{self._wid}Contract# from col-sm-6 text-sm-left: {cn!r}"
+                        )
+                        return cn
+        except Exception:
+            pass
+
+        # Try modal-scoped selectors
         modal_selectors = [
             ".modal-body",
             ".modal",
@@ -704,18 +850,19 @@ class InternalLinkScraper:
     def _parse_contract_number(self, text: str) -> Optional[str]:
         """
         Extract a GSA contract number from a block of text.
-        GSA contract numbers look like: 47QTCA23D00CC  (10–20 uppercase alphanum chars).
+        GSA contract numbers look like: 47QTCA23D00CC  (6–20 uppercase alphanum chars).
         """
         patterns = [
             r'contract\s*[:#\-]?\s*([A-Z0-9]{6,20})',
             r'contract\s+number\s*[:#\-]?\s*([A-Z0-9]{6,20})',
             r'contract\s+#\s*([A-Z0-9]{6,20})',
+            r'(?:^|\s)(47[A-Z0-9]{4,18})\s*$',  # line is often just the contract id
+            r'(?:^|\s)(47[A-Z0-9]{4,18})(?:\s|$)',
         ]
         for pat in patterns:
-            m = re.search(pat, text, re.IGNORECASE)
+            m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
             if m:
                 candidate = m.group(1).strip()
-                # Sanity-check: looks like a real contract number
                 if re.match(r'^[A-Z0-9]{6,20}$', candidate):
                     return candidate
         return None

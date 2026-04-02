@@ -155,23 +155,52 @@ def export_to_excel():
                 logger.info(f"Export Sheet 'GSA Parts Data': {matched} matched rows written")
 
             # ── Sheet 2: Links Scraped Data (link extraction engine) ──────────
+            # Pivot: one Excel row per product link, with up to 6 price sets
+            # as side-by-side columns in the pattern:
+            #   GSA PRICE | Contractor | contract#: |
+            #   GSA PRICE.1 | Contractor.1 | contract#:.1 | … (up to .5)
             if has_links_data:
-                links_rows = [
-                    {
-                        "Link URL":                   r.link,
-                        "Manufacturer Part Name":     r.manufacturer_part_name or "",
-                        "Manufacturer Part Number":   r.manufacturer_part_number or "",
-                        "Price":                      r.price if r.price is not None else "",
-                        "Unit":                       r.unit or "",
-                        "Contractor Name":            r.contractor_name or "",
-                        "Contract Number":            r.contract_number or "",
+                from collections import defaultdict
+
+                # Group scraped rows by link_id, preserving row_order sort
+                link_groups: dict = defaultdict(list)
+                for r in links_scraped:
+                    link_groups[r.link_id].append(r)
+
+                # Column suffixes for up to 6 rows: "", ".1", ".2", ".3", ".4", ".5"
+                _max_rows = 6
+                _suffixes = [""] + [f".{i}" for i in range(1, _max_rows)]
+
+                pivoted_rows = []
+                for link_id in sorted(link_groups.keys()):
+                    rows = sorted(link_groups[link_id], key=lambda r: r.row_order)
+                    base = rows[0]
+
+                    record: dict = {
+                        "Link URL":                 base.link,
+                        "Manufacturer Part Name":   base.manufacturer_part_name or "",
+                        "Manufacturer Part Number": base.manufacturer_part_number or "",
+                        "Unit":                     base.unit or "",
                     }
-                    for r in links_scraped
-                ]
-                df_links = pd.DataFrame(links_rows)
+
+                    for i, sfx in enumerate(_suffixes):
+                        if i < len(rows):
+                            r = rows[i]
+                            record[f"GSA PRICE{sfx}"]  = r.price if r.price is not None else ""
+                            record[f"Contractor{sfx}"] = r.contractor_name or ""
+                            record[f"contract#:{sfx}"] = r.contract_number or ""
+                        else:
+                            record[f"GSA PRICE{sfx}"]  = ""
+                            record[f"Contractor{sfx}"] = ""
+                            record[f"contract#:{sfx}"] = ""
+
+                    pivoted_rows.append(record)
+
+                df_links = pd.DataFrame(pivoted_rows)
                 df_links.to_excel(writer, sheet_name="Links Scraped Data", index=False)
                 logger.info(
-                    f"Export Sheet 'Links Scraped Data': {len(df_links)} rows written"
+                    f"Export Sheet 'Links Scraped Data': {len(df_links)} product row(s) "
+                    f"pivoted from {len(links_scraped)} scraped record(s)"
                 )
 
         # ── Choose a descriptive filename based on what was exported ──────────

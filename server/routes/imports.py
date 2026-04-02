@@ -23,6 +23,61 @@ logger = logging.getLogger(__name__)
 ALLOWED_EXTENSIONS = (".xlsx", ".xls")
 
 
+def _link_rows_from_dataframe(df: pd.DataFrame) -> list[dict]:
+    """
+    Map columns (case-insensitive) and build imported_links row dicts from one sheet.
+    Same rules as the original single-sheet import: internal column and/or external columns.
+    """
+    col_map: dict[str, str] = {}
+    for col in df.columns:
+        lower = str(col).strip().lower()
+        if lower == "internal link url":
+            col_map["internal_links"] = col
+        elif lower == "external link url":
+            col_map["external_links"] = col
+        elif lower == "manufacturer part number":
+            col_map["part_number"] = col
+
+    has_internal = "internal_links" in col_map
+    has_external = "external_links" in col_map and "part_number" in col_map
+
+    if not has_internal and not has_external:
+        return []
+
+    records: list[dict] = []
+
+    if has_internal:
+        for _, row in df.iterrows():
+            link = str(row[col_map["internal_links"]]).strip()
+            if not link or link.lower() == "nan":
+                continue
+            is_pd = "product_detail" in link.lower()
+            records.append({
+                "link": link,
+                "part_number": None,
+                "is_product_detail": is_pd,
+                "link_type": "internal",
+            })
+
+    if has_external:
+        for _, row in df.iterrows():
+            link = str(row[col_map["external_links"]]).strip()
+            pn = str(row[col_map["part_number"]]).strip()
+            if not link or link.lower() == "nan":
+                continue
+            if not pn or pn.lower() == "nan":
+                pn = None
+            is_pd = "product_detail" in link.lower()
+            records.append({
+                "link": link,
+                "part_number": pn,
+                "is_product_detail": is_pd,
+                "link_type": "external",
+            })
+
+    return records
+
+
 @router.post("/import")
 async def import_excel(file: UploadFile = File(...)):
     """Upload an Excel file to replace the current imported_parts data."""
@@ -85,76 +140,60 @@ async def import_excel(file: UploadFile = File(...)):
 @router.post("/import/links")
 async def import_links(file: UploadFile = File(...)):
     """
-    Upload an Excel file to import links. Accepts two formats:
+    Upload an Excel file to import links. Accepts:
 
-    Format 1 (internal): Single column ``internal_links``
-    Format 2 (external): Two columns ``part_number`` + ``external_links``
+    - **Single sheet**: Internal Link URL column and/or Manufacturer Part Number +
+      External Link URL (same as before).
+
+    - **Two-tab workbook**: First sheet — internal links; second sheet — manufacturer
+      part number + external link. Columns per sheet use the same headers as the
+      one-sheet format.
     """
     if not file.filename or not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
         raise HTTPException(400, "File must be an Excel file (.xlsx or .xls)")
 
     contents = await file.read()
+    records: list[dict] = []
+
     try:
-        df = pd.read_excel(BytesIO(contents))
+        xls = pd.ExcelFile(BytesIO(contents))
     except Exception as e:
         raise HTTPException(422, f"Could not read Excel file: {e}")
 
-    # Map columns (case-insensitive, trimmed)
-    col_map: dict[str, str] = {}
-    for col in df.columns:
-        lower = col.strip().lower()
-        if lower == "internal link url":
-            col_map["internal_links"] = col
-        elif lower == "external link url":
-            col_map["external_links"] = col
-        elif lower == "manufacturer part number":
-            col_map["part_number"] = col
-
-    # Detect format
-    has_internal = "internal_links" in col_map
-    has_external = "external_links" in col_map and "part_number" in col_map
-
-    if not has_internal and not has_external:
-        raise HTTPException(
-            422,
-            "Excel must have either an 'Internal Link URL' column, "
-            "or both 'Manufacturer Part Number' and 'External Link URL' columns. "
-            f"Found: {list(df.columns)}",
-        )
-
-    records: list[dict] = []
-
-    if has_internal:
-        for _, row in df.iterrows():
-            link = str(row[col_map["internal_links"]]).strip()
-            if not link or link.lower() == "nan":
-                continue
-            is_pd = "product_detail" in link.lower()
-            records.append({
-                "link": link,
-                "part_number": None,
-                "is_product_detail": is_pd,
-                "link_type": "internal",
-            })
-
-    if has_external:
-        for _, row in df.iterrows():
-            link = str(row[col_map["external_links"]]).strip()
-            pn = str(row[col_map["part_number"]]).strip()
-            if not link or link.lower() == "nan":
-                continue
-            if not pn or pn.lower() == "nan":
-                pn = None
-            is_pd = "product_detail" in link.lower()
-            records.append({
-                "link": link,
-                "part_number": pn,
-                "is_product_detail": is_pd,
-                "link_type": "external",
-            })
+    if len(xls.sheet_names) >= 2:
+        for idx, sheet in enumerate(xls.sheet_names[:2]):
+            try:
+                df = pd.read_excel(xls, sheet_name=sheet)
+            except Exception as e:
+                raise HTTPException(422, f"Could not read sheet {sheet!r}: {e}")
+            part = _link_rows_from_dataframe(df)
+            logger.info(
+                "Links import sheet %s (%r): %s row(s) parsed",
+                idx + 1,
+                sheet,
+                len(part),
+            )
+            records.extend(part)
+    else:
+        try:
+            df = pd.read_excel(BytesIO(contents))
+        except Exception as e:
+            raise HTTPException(422, f"Could not read Excel file: {e}")
+        records = _link_rows_from_dataframe(df)
 
     if not records:
-        raise HTTPException(422, "No valid rows found in the Excel file.")
+        sample_cols = []
+        try:
+            df0 = pd.read_excel(xls, sheet_name=0)
+            sample_cols = list(df0.columns)
+        except Exception:
+            pass
+        raise HTTPException(
+            422,
+            "No valid link rows found. Each sheet must have either an "
+            "'Internal Link URL' column, or both 'Manufacturer Part Number' and "
+            f"'External Link URL' columns. First sheet columns: {sample_cols}",
+        )
 
     engine = get_engine()
     SQLModel.metadata.create_all(engine)
