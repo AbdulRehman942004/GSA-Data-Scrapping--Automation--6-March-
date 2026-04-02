@@ -9,13 +9,70 @@ from sqlmodel import Session, select
 # Ensure the root project dir is in sys.path so we can import modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.db import get_engine
-from database.models import GSAScrapedData, ImportedPart
+from database.models import GSAScrapedData, ImportedPart, LinkScrapedData
 
 logger = logging.getLogger(__name__)
 
 
+def get_export_info() -> dict:
+    """
+    Return a lightweight summary of what data is available to export.
+    Used by the frontend to show the user what will be in their download
+    before actually streaming the file.
+
+    Returns:
+        {
+          "has_parts_data":  bool,  # gsa_scraped_data has records
+          "has_links_data":  bool,  # links_scraped_data has records
+          "parts_records":   int,
+          "links_records":   int,
+          "active_engine":   "parts" | "links" | "both" | "none"
+        }
+    """
+    try:
+        engine = get_engine()
+        with Session(engine) as session:
+            parts_records = session.query(GSAScrapedData).count()
+            links_records = session.query(LinkScrapedData).count()
+    except Exception as e:
+        logger.error(f"get_export_info DB error: {e}")
+        return {"has_parts_data": False, "has_links_data": False,
+                "parts_records": 0, "links_records": 0, "active_engine": "none"}
+
+    has_parts = parts_records > 0
+    has_links = links_records > 0
+
+    if has_parts and has_links:
+        engine_label = "both"
+    elif has_parts:
+        engine_label = "parts"
+    elif has_links:
+        engine_label = "links"
+    else:
+        engine_label = "none"
+
+    return {
+        "has_parts_data": has_parts,
+        "has_links_data": has_links,
+        "parts_records": parts_records,
+        "links_records": links_records,
+        "active_engine": engine_label,
+    }
+
+
 def export_to_excel():
-    """Build an Excel export from imported_parts joined with gsa_scraped_data.
+    """
+    Smart export: only include a sheet when that engine's scraped data exists.
+
+    Decision table
+    ──────────────────────────────────────────────────────────────
+    gsa_scraped_data   links_scraped_data   Sheets included
+    ─────────────────  ──────────────────── ─────────────────────
+    has records        empty                "GSA Parts Data" only
+    empty              has records          "Links Scraped Data" only
+    has records        has records          both sheets
+    empty              empty                → error (None returned)
+    ──────────────────────────────────────────────────────────────
 
     Returns (BytesIO buffer, filename) on success, or None on failure.
     """
@@ -27,72 +84,106 @@ def export_to_excel():
 
     try:
         with Session(engine) as session:
-            # 1. Load imported parts as the base dataset
             imported = session.exec(select(ImportedPart).order_by(ImportedPart.id)).all()
-            if not imported:
-                logger.error("No imported parts found. Nothing to export.")
-                return None
-
-            rows = [
-                {"part_number": r.part_number, "manufacturer": r.manufacturer or ""}
-                for r in imported
-            ]
-            df = pd.DataFrame(rows)
-            logger.info(f"Export: loaded {len(df)} imported parts")
-
-            # 2. Load scraped data
             scraped = session.exec(select(GSAScrapedData)).all()
-            logger.info(f"Export: found {len(scraped)} scraped records")
+            links_scraped = session.exec(
+                select(LinkScrapedData).order_by(
+                    LinkScrapedData.link_id, LinkScrapedData.row_order
+                )
+            ).all()
 
-        # 3. Prepare output columns (use object dtype to allow mixed str/float)
-        output_cols = [
-            '1 GSA Low Price', 'Unit', 'Contractor:Name',
-            '2 GSA Low Price', 'Unit.1', 'Contractor:Name.1'
-        ]
-        for col in output_cols:
-            df[col] = pd.Series([None] * len(df), dtype='object')
+        has_parts_data = len(scraped) > 0
+        has_links_data = len(links_scraped) > 0
 
-        # 4. Merge scraped data into the export
-        updated_count = 0
-        if scraped:
-            scraped_dict = {}
-            for s in scraped:
-                scraped_dict[str(s.part_number).strip()] = {
-                    'gsa_low_price_1': s.gsa_low_price_1,
-                    'unit_1': s.unit_1,
-                    'contractor_1': s.contractor_1,
-                    'gsa_low_price_2': s.gsa_low_price_2,
-                    'unit_2': s.unit_2,
-                    'contractor_2': s.contractor_2,
-                }
+        logger.info(
+            f"Export info: has_parts_data={has_parts_data} ({len(scraped)} records), "
+            f"has_links_data={has_links_data} ({len(links_scraped)} records)"
+        )
 
-            def _val(data, key):
-                v = data.get(key)
-                return v if v is not None and not (isinstance(v, float) and pd.isna(v)) else ''
+        # Nothing to export at all
+        if not has_parts_data and not has_links_data:
+            logger.error(
+                "No scraped data found in either pipeline (gsa_scraped_data and "
+                "links_scraped_data are both empty). Run an extraction first."
+            )
+            return None
 
-            for idx, row in df.iterrows():
-                part_num = str(row['part_number']).strip()
-                if part_num in scraped_dict:
-                    data = scraped_dict[part_num]
-                    df.at[idx, '1 GSA Low Price'] = _val(data, 'gsa_low_price_1')
-                    df.at[idx, 'Unit'] = _val(data, 'unit_1')
-                    df.at[idx, 'Contractor:Name'] = _val(data, 'contractor_1')
-                    df.at[idx, '2 GSA Low Price'] = _val(data, 'gsa_low_price_2')
-                    df.at[idx, 'Unit.1'] = _val(data, 'unit_2')
-                    df.at[idx, 'Contractor:Name.1'] = _val(data, 'contractor_2')
-                    updated_count += 1
-
-            logger.info(f"Export: matched {updated_count} rows with scraped data")
-
-        # 5. Write to in-memory buffer
         timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-        filename = f"gsa_scrapped_products_{timestamp}.xlsx"
-
         output_buffer = io.BytesIO()
-        df.to_excel(output_buffer, index=False, engine='openpyxl')
-        output_buffer.seek(0)
 
-        logger.info(f"Export: {filename} ready ({updated_count} rows with data)")
+        def _val(d, key):
+            v = d.get(key)
+            return v if v is not None and not (isinstance(v, float) and pd.isna(v)) else ''
+
+        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+
+            # ── Sheet 1: GSA Parts Data (price extraction engine) ─────────────
+            if has_parts_data:
+                rows = [
+                    {"part_number": r.part_number, "manufacturer": r.manufacturer or ""}
+                    for r in imported
+                ]
+                df = pd.DataFrame(rows) if rows else pd.DataFrame(
+                    columns=["part_number", "manufacturer"]
+                )
+
+                for col in ['1 GSA Low Price', 'Unit', 'Contractor:Name',
+                            '2 GSA Low Price', 'Unit.1', 'Contractor:Name.1']:
+                    df[col] = pd.Series([None] * len(df), dtype='object')
+
+                scraped_dict = {str(s.part_number).strip(): s for s in scraped}
+                matched = 0
+                for idx, row in df.iterrows():
+                    pn = str(row['part_number']).strip()
+                    if pn in scraped_dict:
+                        s = scraped_dict[pn]
+                        d = {
+                            'gsa_low_price_1': s.gsa_low_price_1, 'unit_1': s.unit_1,
+                            'contractor_1': s.contractor_1,
+                            'gsa_low_price_2': s.gsa_low_price_2, 'unit_2': s.unit_2,
+                            'contractor_2': s.contractor_2,
+                        }
+                        df.at[idx, '1 GSA Low Price']   = _val(d, 'gsa_low_price_1')
+                        df.at[idx, 'Unit']               = _val(d, 'unit_1')
+                        df.at[idx, 'Contractor:Name']    = _val(d, 'contractor_1')
+                        df.at[idx, '2 GSA Low Price']    = _val(d, 'gsa_low_price_2')
+                        df.at[idx, 'Unit.1']             = _val(d, 'unit_2')
+                        df.at[idx, 'Contractor:Name.1']  = _val(d, 'contractor_2')
+                        matched += 1
+
+                df.to_excel(writer, sheet_name="GSA Parts Data", index=False)
+                logger.info(f"Export Sheet 'GSA Parts Data': {matched} matched rows written")
+
+            # ── Sheet 2: Links Scraped Data (link extraction engine) ──────────
+            if has_links_data:
+                links_rows = [
+                    {
+                        "Link URL":                   r.link,
+                        "Manufacturer Part Name":     r.manufacturer_part_name or "",
+                        "Manufacturer Part Number":   r.manufacturer_part_number or "",
+                        "Price":                      r.price if r.price is not None else "",
+                        "Unit":                       r.unit or "",
+                        "Contractor Name":            r.contractor_name or "",
+                        "Contract Number":            r.contract_number or "",
+                    }
+                    for r in links_scraped
+                ]
+                df_links = pd.DataFrame(links_rows)
+                df_links.to_excel(writer, sheet_name="Links Scraped Data", index=False)
+                logger.info(
+                    f"Export Sheet 'Links Scraped Data': {len(df_links)} rows written"
+                )
+
+        # ── Choose a descriptive filename based on what was exported ──────────
+        if has_parts_data and has_links_data:
+            filename = f"gsa_full_export_{timestamp}.xlsx"
+        elif has_parts_data:
+            filename = f"gsa_parts_data_{timestamp}.xlsx"
+        else:
+            filename = f"gsa_links_data_{timestamp}.xlsx"
+
+        output_buffer.seek(0)
+        logger.info(f"Export ready: {filename}")
         return output_buffer, filename
 
     except Exception as e:

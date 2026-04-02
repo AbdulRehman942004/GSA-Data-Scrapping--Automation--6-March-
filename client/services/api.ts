@@ -15,6 +15,7 @@ export interface ScrapingRequest {
   start_row?: number;
   end_row?: number;
   num_workers?: number;
+  sort_order?: 'low_to_high' | 'high_to_low';
 }
 
 export interface WorkerStatus {
@@ -46,8 +47,15 @@ export interface DatabaseStatus {
 export interface AppStatus {
   is_link_generation_running: boolean;
   is_scraping_running: boolean;
+  is_link_extraction_running: boolean;
   database: DatabaseStatus;
   scraping_progress: ScrapingProgress | null;
+  link_extraction_progress: ScrapingProgress | null;  // same shape, avg_seconds_per_row = per-link
+}
+
+export interface LinkExtractionRequest {
+  sort_order?: 'low_to_high' | 'high_to_low';
+  num_workers?: number;
 }
 
 const api = axios.create({
@@ -82,12 +90,25 @@ export const stopScraping = async () => {
   return response.data;
 };
 
+export const startLinkExtraction = async (data: LinkExtractionRequest) => {
+  const response = await api.post('/api/scrape/links/start', data);
+  return response.data;
+};
+
+export const stopLinkExtraction = async () => {
+  const response = await api.post('/api/scrape/links/stop');
+  return response.data;
+};
+
 
 export interface ImportStatus {
   imported_parts_count: number;
+  imported_links_count: number;
+  product_detail_count: number;
+  search_count: number;
 }
 
-export const uploadExcel = async (file: File) => {
+export const uploadParts = async (file: File) => {
   const formData = new FormData();
   formData.append('file', file);
   const response = await api.post('/api/import', formData, {
@@ -96,8 +117,30 @@ export const uploadExcel = async (file: File) => {
   return response.data;
 };
 
+export const uploadLinks = async (file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await api.post('/api/import/links', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return response.data;
+};
+
 export const getImportStatus = async (): Promise<ImportStatus> => {
   const response = await api.get<ImportStatus>('/api/import/status');
+  return response.data;
+};
+
+export interface ExportInfo {
+  has_parts_data: boolean;
+  has_links_data: boolean;
+  parts_records: number;
+  links_records: number;
+  active_engine: 'parts' | 'links' | 'both' | 'none';
+}
+
+export const getExportInfo = async (): Promise<ExportInfo> => {
+  const response = await api.get<ExportInfo>('/api/export/info');
   return response.data;
 };
 

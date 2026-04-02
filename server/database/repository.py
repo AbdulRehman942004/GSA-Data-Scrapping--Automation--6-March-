@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlmodel import Session, select
-from database.models import GSALink, GSAScrapedData, ImportedPart
+from database.models import GSALink, GSAScrapedData, ImportedLink, ImportedPart, LinkScrapedData
 
 
 def get_link_by_part_number(engine, part_number):
@@ -106,6 +106,43 @@ def get_all_imported_parts(engine) -> list[ImportedPart]:
         return session.exec(select(ImportedPart).order_by(ImportedPart.id)).all()
 
 
+# ── Imported links ─────────────────────────────────────────────
+
+def clear_imported_links(engine):
+    """Delete all rows from imported_links."""
+    with Session(engine) as session:
+        records = session.exec(select(ImportedLink)).all()
+        for rec in records:
+            session.delete(rec)
+        session.commit()
+
+
+def bulk_insert_imported_links(engine, links: list[dict]) -> int:
+    """Insert a list of link dicts into imported_links. Returns count."""
+    with Session(engine) as session:
+        for ln in links:
+            session.add(ImportedLink(
+                link=ln["link"],
+                part_number=ln.get("part_number"),
+                is_product_detail=ln.get("is_product_detail", False),
+                link_type=ln.get("link_type", "internal"),
+            ))
+        session.commit()
+    return len(links)
+
+
+def get_imported_links_count(engine) -> int:
+    """Return how many rows are in imported_links."""
+    with Session(engine) as session:
+        return len(session.exec(select(ImportedLink)).all())
+
+
+def get_all_imported_links(engine) -> list[ImportedLink]:
+    """Return all imported link records."""
+    with Session(engine) as session:
+        return session.exec(select(ImportedLink).order_by(ImportedLink.id)).all()
+
+
 def clear_gsa_links(engine):
     """Delete all rows from gsa_links."""
     with Session(engine) as session:
@@ -121,4 +158,87 @@ def clear_gsa_scraped_data(engine):
         records = session.exec(select(GSAScrapedData)).all()
         for rec in records:
             session.delete(rec)
+        session.commit()
+
+
+# ── Links scraped data (product_detail compare sources) ────────
+
+def get_all_product_detail_links(engine) -> list[ImportedLink]:
+    """Return all ImportedLink rows where is_product_detail=True and not yet scraped."""
+    with Session(engine) as session:
+        return session.exec(
+            select(ImportedLink)
+            .where(ImportedLink.is_product_detail == True)
+            .where(ImportedLink.is_scraped == False)
+            .order_by(ImportedLink.id)
+        ).all()
+
+
+def mark_imported_link_scraped(engine, link_id: int):
+    """Set is_scraped=True on the ImportedLink record."""
+    with Session(engine) as session:
+        rec = session.exec(
+            select(ImportedLink).where(ImportedLink.id == link_id)
+        ).first()
+        if rec:
+            rec.is_scraped = True
+            session.add(rec)
+            session.commit()
+
+
+def clear_links_scraped_data_for_link(engine, link_id: int):
+    """Delete all links_scraped_data rows for a given link_id (before re-scraping)."""
+    with Session(engine) as session:
+        records = session.exec(
+            select(LinkScrapedData).where(LinkScrapedData.link_id == link_id)
+        ).all()
+        for rec in records:
+            session.delete(rec)
+        session.commit()
+
+
+def insert_link_scraped_rows(engine, link_id: int, link_url: str, rows: list[dict]) -> int:
+    """Insert a list of scraped row dicts into links_scraped_data. Returns count inserted."""
+    with Session(engine) as session:
+        for row in rows:
+            session.add(LinkScrapedData(
+                link_id=link_id,
+                link=link_url,
+                manufacturer_part_name=row.get("manufacturer_part_name"),
+                manufacturer_part_number=row.get("manufacturer_part_number"),
+                price=row.get("price"),
+                unit=row.get("unit"),
+                contractor_name=row.get("contractor_name"),
+                contract_number=row.get("contract_number"),
+                row_order=row.get("row_order", 0),
+            ))
+        session.commit()
+    return len(rows)
+
+
+def get_all_links_scraped_data(engine) -> list[LinkScrapedData]:
+    """Return all rows from links_scraped_data ordered by link_id and row_order."""
+    with Session(engine) as session:
+        return session.exec(
+            select(LinkScrapedData)
+            .order_by(LinkScrapedData.link_id, LinkScrapedData.row_order)
+        ).all()
+
+
+def clear_links_scraped_data(engine):
+    """Delete all rows from links_scraped_data."""
+    with Session(engine) as session:
+        records = session.exec(select(LinkScrapedData)).all()
+        for rec in records:
+            session.delete(rec)
+        session.commit()
+
+
+def clear_imported_links_scraped_flags(engine):
+    """Reset is_scraped=False on all ImportedLink rows (used when links are re-imported)."""
+    with Session(engine) as session:
+        records = session.exec(select(ImportedLink)).all()
+        for rec in records:
+            rec.is_scraped = False
+            session.add(rec)
         session.commit()

@@ -1,13 +1,51 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+from sqlmodel import SQLModel
 
 from settings import ALLOWED_ORIGINS
 from routes import imports, links, scraping, status
+from database.db import get_engine
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Run DB migrations on startup."""
+    try:
+        engine = get_engine()
+        SQLModel.metadata.create_all(engine)
+        with engine.connect() as conn:
+            # Remove is_product_detail from gsa_links if it exists (moved to imported_links table)
+            conn.execute(text(
+                "ALTER TABLE gsa_links DROP COLUMN IF EXISTS is_product_detail"
+            ))
+            # Add new columns to imported_links if they don't exist
+            conn.execute(text(
+                "ALTER TABLE imported_links ADD COLUMN IF NOT EXISTS part_number VARCHAR DEFAULT NULL"
+            ))
+            conn.execute(text(
+                "ALTER TABLE imported_links ADD COLUMN IF NOT EXISTS link_type VARCHAR DEFAULT 'internal'"
+            ))
+            # Track whether a product_detail link has already been scraped
+            conn.execute(text(
+                "ALTER TABLE imported_links ADD COLUMN IF NOT EXISTS is_scraped BOOLEAN DEFAULT FALSE"
+            ))
+            conn.commit()
+        logger.info("Database migrations completed successfully.")
+    except Exception as e:
+        logger.warning(f"Database migration skipped (will retry on first request): {e}")
+    yield
 
 app = FastAPI(
     title="GSA Scraper Automation API",
     description="API to run and track the GSA Advantage link generation, scraping, and export processes.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(

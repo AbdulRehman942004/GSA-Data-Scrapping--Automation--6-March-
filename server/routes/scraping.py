@@ -3,9 +3,10 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 import state
 from database.db import get_engine
-from database.repository import get_imported_parts_count
+from database.repository import get_imported_parts_count, get_all_product_detail_links
 from services.parallel_scraper import ParallelScrapingOrchestrator
-from models.requests import ScrapingRequest
+from services.parallel_link_extractor import ParallelLinkExtractionOrchestrator
+from models.requests import ScrapingRequest, LinkExtractionRequest
 
 router = APIRouter(prefix="/api/scrape", tags=["Scraping"])
 logger = logging.getLogger(__name__)
@@ -25,7 +26,10 @@ def _validate_range(start_row: int, end_row: int) -> None:
 def _run_scraping(req: ScrapingRequest) -> None:
     """Background task: runs parallel scraping and resets state when done."""
     try:
-        orchestrator = ParallelScrapingOrchestrator(num_workers=req.num_workers)
+        orchestrator = ParallelScrapingOrchestrator(
+            num_workers=req.num_workers,
+            sort_order=req.sort_order,
+        )
         state.parallel_orchestrator = orchestrator
 
         if req.mode == "test":
@@ -78,3 +82,66 @@ async def stop_scrape():
         state.active_scraping_automation.stop()
         return {"status": "stopping", "message": "Scraping stop signal sent."}
     return {"status": "idle", "message": "Scraping is not running."}
+
+
+# ── Link extraction endpoints (imported_links → links_scraped_data) ───────────
+
+def _run_link_extraction(req: LinkExtractionRequest) -> None:
+    """Background task: runs ParallelLinkExtractionOrchestrator and resets state."""
+    try:
+        orchestrator = ParallelLinkExtractionOrchestrator(
+            num_workers=req.num_workers,
+            sort_order=req.sort_order,
+        )
+        with state.state_lock:
+            state.parallel_link_extractor = orchestrator
+            state.active_link_extractor = orchestrator
+        orchestrator.run_full()
+    except Exception as e:
+        logger.error(f"Link extraction background task error: {e}")
+    finally:
+        with state.state_lock:
+            state.is_link_extraction_running = False
+            state.active_link_extractor = None
+            state.parallel_link_extractor = None
+
+
+@router.post("/links/start")
+async def start_link_extraction(req: LinkExtractionRequest, background_tasks: BackgroundTasks):
+    """
+    Start the internal link extraction pipeline.
+    Works on uploaded links (imported_links where is_product_detail=True).
+    Opens each product detail page, clicks Compare Available Sources,
+    and scrapes up to 6 rows of pricing data into links_scraped_data.
+    """
+    engine = get_engine()
+    links = get_all_product_detail_links(engine)
+    if not links:
+        raise HTTPException(
+            status_code=400,
+            detail="No product_detail links available. Please upload a links Excel file first."
+        )
+
+    with state.state_lock:
+        if state.is_link_extraction_running:
+            raise HTTPException(status_code=400, detail="Link extraction is already running.")
+        state.is_link_extraction_running = True
+
+    background_tasks.add_task(_run_link_extraction, req)
+    return {
+        "status": "started",
+        "message": f"Link extraction started for {len(links)} product_detail link(s).",
+        "links_count": len(links),
+    }
+
+
+@router.post("/links/stop")
+async def stop_link_extraction():
+    """Send a stop signal to all running link extraction workers."""
+    if state.parallel_link_extractor:
+        state.parallel_link_extractor.stop()
+        return {"status": "stopping", "message": "Stop signal sent to all link extraction workers."}
+    if state.active_link_extractor:
+        state.active_link_extractor.stop()
+        return {"status": "stopping", "message": "Stop signal sent to link extractor."}
+    return {"status": "idle", "message": "Link extraction is not running."}

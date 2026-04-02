@@ -14,3 +14,9 @@ class ScrapingRequest(BaseModel):
     start_row: int = 1
     end_row: int = 100
     num_workers: int = 0     # 0 = auto-detect based on CPU
+    sort_order: str = "low_to_high"  # "low_to_high" | "high_to_low"
+
+
+class LinkExtractionRequest(BaseModel):
+    sort_order: str = "low_to_high"  # "low_to_high" | "high_to_low"
+    num_workers: int = 0              # 0 = auto-detect based on CPU count

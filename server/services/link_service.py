@@ -22,14 +22,17 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 class GSALinkAutomationFast:
-    def __init__(self, excel_file_path):
+    SORT_PARAMS = {"low_to_high": "6", "high_to_low": "7"}
+
+    def __init__(self, excel_file_path, sort_order: str = "low_to_high"):
         self.excel_file_path = excel_file_path
-        
+        self.sort_order = sort_order
+
         # Load config
         config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.yml')
         with open(config_path, 'r') as file:
             config = yaml.safe_load(file)
-            
+
         self.base_url = config['gsa_urls']['base_url']
         self.url_template = config['gsa_urls']['url_template']
         self._setup_db()
@@ -107,7 +110,8 @@ class GSALinkAutomationFast:
             clean_part_number = str(part_number).strip()
 
             # Construct the URL using the pattern
-            query_part = self.url_template.format(part_number=clean_part_number)
+            sort_param = self.SORT_PARAMS.get(self.sort_order, "6")
+            query_part = self.url_template.format(part_number=clean_part_number, sort_param=sort_param)
             full_url = self.base_url + query_part
 
             return full_url

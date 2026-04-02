@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Bot, Database, Download, FileSpreadsheet, RefreshCw, CheckCircle, Search, Rocket, Loader2, Upload } from 'lucide-react';
+import { Bot, Database, Download, FileSpreadsheet, RefreshCw, CheckCircle, Search, Rocket, Loader2, Upload, Link } from 'lucide-react';
 import toast, { Toaster } from 'react-hot-toast';
 import * as api from '../services/api';
 
@@ -11,14 +11,21 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
 
   const [numWorkers, setNumWorkers] = useState(0);
+  const [numLinkWorkers, setNumLinkWorkers] = useState(0);
+  const [sortOrder, setSortOrder] = useState<'low_to_high' | 'high_to_low'>('low_to_high');
   const [isExporting, setIsExporting] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [isUploadingLinks, setIsUploadingLinks] = useState(false);
   const [importedCount, setImportedCount] = useState<number | null>(null);
+  const [productDetailCount, setProductDetailCount] = useState<number>(0);
+  const [searchCount, setSearchCount] = useState<number>(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const linksFileInputRef = useRef<HTMLInputElement>(null);
 
   // Refs to track previous status for completion detection
   const prevLinkRunning = useRef<boolean>(false);
   const prevScrapeRunning = useRef<boolean>(false);
+  const prevLinkExtractionRunning = useRef<boolean>(false);
 
   const fetchStatus = async () => {
     try {
@@ -31,9 +38,13 @@ export default function Dashboard() {
       if (prevScrapeRunning.current && !data.is_scraping_running) {
          toast.success("Web Scraping Phase completed successfully!", { duration: 5000 });
       }
-      
+      if (prevLinkExtractionRunning.current && !data.is_link_extraction_running) {
+         toast.success("Link Extraction completed successfully!", { duration: 5000 });
+      }
+
       prevLinkRunning.current = data.is_link_generation_running;
       prevScrapeRunning.current = data.is_scraping_running;
+      prevLinkExtractionRunning.current = data.is_link_extraction_running;
 
       setStatus(data);
 
@@ -41,6 +52,8 @@ export default function Dashboard() {
       try {
         const importData = await api.getImportStatus();
         setImportedCount(importData.imported_parts_count);
+        setProductDetailCount(importData.product_detail_count);
+        setSearchCount(importData.search_count);
       } catch { /* ignore if endpoint not available */ }
 
       if (error) {
@@ -77,7 +90,7 @@ export default function Dashboard() {
     try {
       const workers = numWorkers > 0 ? numWorkers : undefined;
       toast.loading(`Initiating Full Selenium Scraper${workers ? ` (${workers} workers)` : ''}...`, { id: 'scrape' });
-      await api.startScraping({ mode: 'full', num_workers: workers });
+      await api.startScraping({ mode: 'full', num_workers: workers, sort_order: sortOrder });
       toast.success("Selenium Scraping queued successfully!", { id: 'scrape' });
       fetchStatus();
     } catch (err: any) {
@@ -107,14 +120,72 @@ export default function Dashboard() {
     }
   };
 
+  const handleLinkExtraction = async () => {
+    try {
+      const workers = numLinkWorkers > 0 ? numLinkWorkers : undefined;
+      toast.loading(`Initiating Link Extraction${workers ? ` (${workers} workers)` : ''}...`, { id: 'linkExtract' });
+      await api.startLinkExtraction({ sort_order: sortOrder, num_workers: workers });
+      toast.success("Link Extraction queued successfully!", { id: 'linkExtract' });
+      fetchStatus();
+    } catch (err: any) {
+      toast.error(`Error starting Link Extraction: ${err?.response?.data?.detail || err.message}`, { id: 'linkExtract' });
+    }
+  };
+
+  const handleStopLinkExtraction = async () => {
+    try {
+      toast.loading("Sending stop signal to Link Extractor...", { id: 'linkExtractStop' });
+      await api.stopLinkExtraction();
+      toast.success("Stop signal received. Extractor will close soon.", { id: 'linkExtractStop' });
+      fetchStatus();
+    } catch (err: any) {
+      toast.error(`Stop failed: ${err.message}`, { id: 'linkExtractStop' });
+    }
+  };
+
   const handleExport = async () => {
     try {
       setIsExporting(true);
-      toast.loading("Generating and compiling .XLSX Deliverable...", { id: 'export' });
+
+      // Check what data is available before downloading
+      const info = await api.getExportInfo();
+
+      if (info.active_engine === 'none') {
+        toast.error(
+          "No scraped data found. Run Price Extraction or Link Extraction first.",
+          { id: 'export', duration: 5000 }
+        );
+        return;
+      }
+
+      const engineLabels: Record<string, string> = {
+        parts: `Price Extraction data (${info.parts_records.toLocaleString()} records)`,
+        links: `Link Extraction data (${info.links_records.toLocaleString()} records)`,
+        both:  `Price Extraction (${info.parts_records.toLocaleString()} records) + Link Extraction (${info.links_records.toLocaleString()} records)`,
+      };
+
+      toast.loading(
+        `Compiling ${engineLabels[info.active_engine] ?? 'data'}...`,
+        { id: 'export' }
+      );
+
       await api.downloadExport();
-      toast.success("Excel bundle generated and downloaded successfully!", { id: 'export' });
+
+      const successLabels: Record<string, string> = {
+        parts: "GSA Parts Data sheet downloaded successfully!",
+        links: "Links Scraped Data sheet downloaded successfully!",
+        both:  "Full export (both sheets) downloaded successfully!",
+      };
+
+      toast.success(
+        successLabels[info.active_engine] ?? "Excel file downloaded successfully!",
+        { id: 'export', duration: 5000 }
+      );
     } catch (err: any) {
-      toast.error(`Export failed: ${err.message}`, { id: 'export' });
+      toast.error(
+        `Export failed: ${err?.response?.data?.detail || err.message}`,
+        { id: 'export' }
+      );
     } finally {
       setIsExporting(false);
     }
@@ -125,16 +196,36 @@ export default function Dashboard() {
     if (!file) return;
     try {
       setIsUploading(true);
-      toast.loading("Uploading and importing Excel data...", { id: 'import' });
-      const result = await api.uploadExcel(file);
+      toast.loading("Uploading and importing parts data...", { id: 'import' });
+      const result = await api.uploadParts(file);
       setImportedCount(result.rows_imported);
-      toast.success(`Imported ${result.rows_imported.toLocaleString()} rows from ${result.filename}`, { id: 'import', duration: 5000 });
+      toast.success(`Imported ${result.rows_imported.toLocaleString()} parts from ${result.filename}`, { id: 'import', duration: 5000 });
       fetchStatus();
     } catch (err: any) {
       toast.error(`Import failed: ${err?.response?.data?.detail || err.message}`, { id: 'import' });
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleLinksUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      setIsUploadingLinks(true);
+      toast.loading("Uploading and importing links data...", { id: 'importLinks' });
+      const result = await api.uploadLinks(file);
+      toast.success(
+        `Imported ${result.rows_imported.toLocaleString()} links (${result.product_detail_links} product detail, ${result.search_links} search)`,
+        { id: 'importLinks', duration: 5000 }
+      );
+      fetchStatus();
+    } catch (err: any) {
+      toast.error(`Import failed: ${err?.response?.data?.detail || err.message}`, { id: 'importLinks' });
+    } finally {
+      setIsUploadingLinks(false);
+      if (linksFileInputRef.current) linksFileInputRef.current.value = '';
     }
   };
 
@@ -176,71 +267,124 @@ export default function Dashboard() {
         )}
 
         {/* Dynamic Database Statistics */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
           <StatCard
-            title="Imported Rows"
+            title="Imported Parts"
             value={importedCount ?? 0}
             icon={<Upload className="w-5 h-5" />}
             color="text-amber-600"
             bg="bg-amber-50 border border-amber-100"
           />
           <StatCard
+            title="Product Detail Links"
+            value={productDetailCount}
+            icon={<FileSpreadsheet className="w-5 h-5" />}
+            color="text-indigo-600"
+            bg="bg-indigo-50 border border-indigo-100"
+          />
+          <StatCard
+            title="Search Links"
+            value={searchCount}
+            icon={<Search className="w-5 h-5" />}
+            color="text-cyan-600"
+            bg="bg-cyan-50 border border-cyan-100"
+          />
+          <StatCard
             title="Generated URL Links"
             value={status?.database.total_generated_links_count}
-            icon={<Search className="w-5 h-5" />}
+            icon={<Link className="w-5 h-5" />}
             color="text-blue-600"
             bg="bg-blue-50 border border-blue-100"
           />
-          <StatusStatCard 
-            title="Extraction Status" 
-            completed={status?.database.total_successfully_scraped_links_count} 
+          <StatusStatCard
+            title="Extraction Status"
+            completed={status?.database.total_successfully_scraped_links_count}
             total={status?.database.total_generated_links_count}
-            icon={<CheckCircle className="w-5 h-5" />} 
+            icon={<CheckCircle className="w-5 h-5" />}
             color="text-emerald-600"
             bg="bg-emerald-50 border border-emerald-100"
             fill="bg-emerald-500"
           />
-          <StatCard 
-            title="Extracted Pricing Records" 
-            value={status?.database.total_scraped_data_records} 
-            icon={<Database className="w-5 h-5" />} 
+          <StatCard
+            title="Extracted Pricing Records"
+            value={status?.database.total_scraped_data_records}
+            icon={<Database className="w-5 h-5" />}
             color="text-purple-600"
             bg="bg-purple-50 border border-purple-100"
           />
         </div>
 
-        {/* Excel Import Section */}
-        <div className="bg-white border border-slate-200 shadow-sm rounded-2xl p-6 relative overflow-hidden group">
-          <div className="absolute inset-0 bg-gradient-to-br from-amber-50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-          <div className="flex flex-col md:flex-row items-center justify-between gap-4 relative z-10">
-            <div>
-              <h2 className="text-xl font-bold flex items-center gap-2 text-slate-800">
-                <Upload className="w-5 h-5 text-amber-600" />
-                Import Excel Dataset
-              </h2>
-              <p className="text-slate-500 text-sm mt-1">
-                Upload an Excel file with <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs font-mono">part_number</code> and <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs font-mono">manufacturer</code> columns to use as the scraping source.
-              </p>
+        {/* Import Section */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Import Parts */}
+          <div className="bg-white border border-slate-200 shadow-sm rounded-2xl p-6 relative overflow-hidden group">
+            <div className="absolute inset-0 bg-gradient-to-br from-amber-50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="flex flex-col gap-4 relative z-10">
+              <div>
+                <h2 className="text-xl font-bold flex items-center gap-2 text-slate-800">
+                  <Upload className="w-5 h-5 text-amber-600" />
+                  Import Parts
+                </h2>
+                <p className="text-slate-500 text-sm mt-1">
+                  Upload an Excel file with <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs font-mono">part_number</code> and <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs font-mono">manufacturer</code> columns.
+                </p>
+              </div>
+              <div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".xlsx,.xls"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isUploading || status?.is_link_generation_running || status?.is_scraping_running}
+                  className="w-full flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 disabled:hover:bg-amber-500 text-white font-semibold px-5 py-3 rounded-xl transition-all shadow-md active:scale-[0.98]"
+                >
+                  {isUploading ? (
+                    <><Loader2 className="w-5 h-5 animate-spin" /> Importing...</>
+                  ) : (
+                    <><Upload className="w-5 h-5" /> Upload Parts .XLSX</>
+                  )}
+                </button>
+              </div>
             </div>
-            <div className="flex items-center gap-3">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".xlsx,.xls"
-                onChange={handleFileUpload}
-                className="hidden"
-              />
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isUploading || status?.is_link_generation_running || status?.is_scraping_running}
-                className="whitespace-nowrap flex items-center gap-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 disabled:hover:bg-amber-500 text-white font-semibold px-5 py-3 rounded-xl transition-all shadow-md active:scale-[0.98]"
-              >
-                {isUploading ? (
-                  <><Loader2 className="w-5 h-5 animate-spin" /> Importing...</>
-                ) : (
-                  <><Upload className="w-5 h-5" /> Upload .XLSX</>
-                )}
-              </button>
+          </div>
+
+          {/* Import Links */}
+          <div className="bg-white border border-slate-200 shadow-sm rounded-2xl p-6 relative overflow-hidden group">
+            <div className="absolute inset-0 bg-gradient-to-br from-indigo-50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="flex flex-col gap-4 relative z-10">
+              <div>
+                <h2 className="text-xl font-bold flex items-center gap-2 text-slate-800">
+                  <Link className="w-5 h-5 text-indigo-600" />
+                  Import Links
+                </h2>
+                <p className="text-slate-500 text-sm mt-1">
+                  Accepts: <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs font-mono">Internal Link URL</code> column, or <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs font-mono">Manufacturer Part Number</code> + <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs font-mono">External Link URL</code>.
+                </p>
+              </div>
+              <div>
+                <input
+                  ref={linksFileInputRef}
+                  type="file"
+                  accept=".xlsx,.xls"
+                  onChange={handleLinksUpload}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => linksFileInputRef.current?.click()}
+                  disabled={isUploadingLinks || status?.is_link_generation_running || status?.is_scraping_running}
+                  className="w-full flex items-center justify-center gap-2 bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 disabled:hover:bg-indigo-500 text-white font-semibold px-5 py-3 rounded-xl transition-all shadow-md active:scale-[0.98]"
+                >
+                  {isUploadingLinks ? (
+                    <><Loader2 className="w-5 h-5 animate-spin" /> Importing...</>
+                  ) : (
+                    <><Link className="w-5 h-5" /> Upload Links .XLSX</>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -300,53 +444,73 @@ export default function Dashboard() {
           {/* Scraping Panel */}
           <div className="bg-white border border-slate-200 shadow-sm rounded-2xl p-6 relative overflow-hidden group">
             <div className="absolute inset-0 bg-gradient-to-br from-emerald-50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-            
-            <div className="flex items-center justify-between mb-6">
+
+            <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold flex items-center gap-2 text-slate-800">
                 <Bot className="w-5 h-5 text-emerald-600" />
                 Phase 2: Selenium Scraper
               </h2>
-              {status?.is_scraping_running && (
-                <span className="flex items-center gap-2 text-xs font-semibold bg-emerald-50 text-emerald-700 px-3 py-1 rounded-full border border-emerald-200">
-                  <RefreshCw className="w-3 h-3 animate-spin" /> Scraping actively...
-                </span>
-              )}
+              <div className="flex items-center gap-2">
+                {status?.is_scraping_running && (
+                  <span className="flex items-center gap-2 text-xs font-semibold bg-emerald-50 text-emerald-700 px-3 py-1 rounded-full border border-emerald-200">
+                    <RefreshCw className="w-3 h-3 animate-spin" /> Scraping...
+                  </span>
+                )}
+                {status?.is_link_extraction_running && (
+                  <span className="flex items-center gap-2 text-xs font-semibold bg-indigo-50 text-indigo-700 px-3 py-1 rounded-full border border-indigo-200">
+                    <RefreshCw className="w-3 h-3 animate-spin" /> Extracting Links...
+                  </span>
+                )}
+              </div>
             </div>
 
-            <div className="space-y-4 relative z-10">
+            <div className="space-y-0 relative z-10">
 
-              <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl text-slate-600 text-sm font-medium flex items-center gap-3">
-                <Bot className="w-5 h-5 text-slate-400" />
-                Scrapes GSA Advantage pricing data for all imported part numbers.
-              </div>
-
-              {/* Worker Count */}
-              <div className="flex flex-col gap-2">
-                <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Parallel Workers</label>
+              {/* Shared: Price Sort */}
+              <div className="flex flex-col gap-2 pb-4">
+                <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Price Sort (shared)</label>
                 <select
-                  value={numWorkers}
-                  onChange={(e) => setNumWorkers(Number(e.target.value))}
-                  disabled={status?.is_scraping_running}
+                  value={sortOrder}
+                  onChange={(e) => setSortOrder(e.target.value as 'low_to_high' | 'high_to_low')}
+                  disabled={status?.is_scraping_running || status?.is_link_extraction_running}
                   className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-emerald-500/50 shadow-sm transition-all disabled:opacity-50"
                 >
-                  <option value={0}>Auto-detect</option>
-                  <option value={1}>1 Worker</option>
-                  <option value={2}>2 Workers</option>
-                  <option value={3}>3 Workers</option>
-                  <option value={4}>4 Workers</option>
-                  <option value={5}>5 Workers</option>
+                  <option value="low_to_high">Low to High</option>
+                  <option value="high_to_low">High to Low</option>
                 </select>
               </div>
 
-              {/* Live Progress */}
-              {status?.scraping_progress && status.is_scraping_running && (
-                <ScrapingProgressPanel progress={status.scraping_progress} />
-              )}
+              {/* ── Price Extraction sub-section ──────────────────────────── */}
+              <div className="border-t border-slate-100 pt-4 space-y-3">
+                <p className="text-xs uppercase font-bold text-emerald-700 tracking-wider flex items-center gap-1.5">
+                  <CheckCircle className="w-3.5 h-3.5" /> Price Extraction — works on Import Parts
+                </p>
 
-                <div className="flex gap-2 mt-4">
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Parallel Workers</label>
+                  <select
+                    value={numWorkers}
+                    onChange={(e) => setNumWorkers(Number(e.target.value))}
+                    disabled={status?.is_scraping_running}
+                    className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-emerald-500/50 shadow-sm transition-all disabled:opacity-50"
+                  >
+                    <option value={0}>Auto-detect</option>
+                    <option value={1}>1 Worker</option>
+                    <option value={2}>2 Workers</option>
+                    <option value={3}>3 Workers</option>
+                    <option value={4}>4 Workers</option>
+                    <option value={5}>5 Workers</option>
+                  </select>
+                </div>
+
+                {status?.scraping_progress && status.is_scraping_running && (
+                  <ScrapingProgressPanel progress={status.scraping_progress} colorClass="emerald" />
+                )}
+
+                <div className="flex gap-2">
                   <button
                     onClick={handleScraping}
-                    disabled={status?.is_scraping_running || !!error}
+                    disabled={status?.is_scraping_running || status?.is_link_extraction_running || !!error}
                     className="flex-1 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:hover:bg-emerald-600 text-white font-semibold px-4 py-3 rounded-xl transition-all shadow-md active:scale-[0.98]"
                   >
                     {status?.is_scraping_running ? (
@@ -355,17 +519,67 @@ export default function Dashboard() {
                       <><CheckCircle className="w-5 h-5" /> Start Price Extraction</>
                     )}
                   </button>
-
                   {status?.is_scraping_running && (
                     <button
                       onClick={handleStopScraping}
                       className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 font-bold px-6 py-3 rounded-xl transition-all active:scale-95"
-                      title="Forcibly stop scraping"
                     >
                       Stop
                     </button>
                   )}
                 </div>
+              </div>
+
+              {/* ── Link Extraction sub-section ───────────────────────────── */}
+              <div className="border-t border-slate-100 pt-4 space-y-3">
+                <p className="text-xs uppercase font-bold text-indigo-700 tracking-wider flex items-center gap-1.5">
+                  <Link className="w-3.5 h-3.5" /> Link Extraction — works on Import Links
+                </p>
+
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Parallel Workers</label>
+                  <select
+                    value={numLinkWorkers}
+                    onChange={(e) => setNumLinkWorkers(Number(e.target.value))}
+                    disabled={status?.is_link_extraction_running}
+                    className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-indigo-500/50 shadow-sm transition-all disabled:opacity-50"
+                  >
+                    <option value={0}>Auto-detect</option>
+                    <option value={1}>1 Worker</option>
+                    <option value={2}>2 Workers</option>
+                    <option value={3}>3 Workers</option>
+                    <option value={4}>4 Workers</option>
+                    <option value={5}>5 Workers</option>
+                  </select>
+                </div>
+
+                {status?.link_extraction_progress && status.is_link_extraction_running && (
+                  <ScrapingProgressPanel progress={status.link_extraction_progress} colorClass="indigo" />
+                )}
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleLinkExtraction}
+                    disabled={status?.is_link_extraction_running || status?.is_scraping_running || !!error}
+                    className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:hover:bg-indigo-600 text-white font-semibold px-4 py-3 rounded-xl transition-all shadow-md active:scale-[0.98]"
+                  >
+                    {status?.is_link_extraction_running ? (
+                      <><Loader2 className="w-5 h-5 animate-spin" /> Extracting Links...</>
+                    ) : (
+                      <><Link className="w-5 h-5" /> Start Link Extraction</>
+                    )}
+                  </button>
+                  {status?.is_link_extraction_running && (
+                    <button
+                      onClick={handleStopLinkExtraction}
+                      className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 font-bold px-6 py-3 rounded-xl transition-all active:scale-95"
+                    >
+                      Stop
+                    </button>
+                  )}
+                </div>
+              </div>
+
             </div>
           </div>
         </div>
@@ -429,26 +643,50 @@ function formatDuration(seconds: number): string {
   return `${h}h ${m}m`;
 }
 
-function ScrapingProgressPanel({ progress }: { progress: api.ScrapingProgress }) {
+const PROGRESS_PANEL_STYLES: Record<string, { bg: string; border: string; bar: string; barTrack: string; textBold: string; textMid: string; workerBorder: string; workerText: string; workerSubText: string }> = {
+  emerald: {
+    bg: "bg-emerald-50",
+    border: "border-emerald-200",
+    bar: "bg-emerald-500",
+    barTrack: "bg-emerald-100",
+    textBold: "text-emerald-800",
+    textMid: "text-emerald-700",
+    workerBorder: "border-emerald-100",
+    workerText: "text-emerald-800",
+    workerSubText: "text-emerald-600",
+  },
+  indigo: {
+    bg: "bg-indigo-50",
+    border: "border-indigo-200",
+    bar: "bg-indigo-500",
+    barTrack: "bg-indigo-100",
+    textBold: "text-indigo-800",
+    textMid: "text-indigo-700",
+    workerBorder: "border-indigo-100",
+    workerText: "text-indigo-800",
+    workerSubText: "text-indigo-600",
+  },
+};
+
+function ScrapingProgressPanel({ progress, colorClass = "emerald" }: { progress: api.ScrapingProgress; colorClass?: string }) {
   const pct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+  const s = PROGRESS_PANEL_STYLES[colorClass] ?? PROGRESS_PANEL_STYLES.emerald;
 
   return (
-    <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
-      {/* Progress bar */}
-      <div className="w-full h-2.5 bg-emerald-100 rounded-full overflow-hidden">
+    <div className={`${s.bg} border ${s.border} rounded-xl p-4 space-y-3`}>
+      <div className={`w-full h-2.5 ${s.barTrack} rounded-full overflow-hidden`}>
         <div
-          className="h-full bg-emerald-500 rounded-full transition-all duration-1000 ease-in-out"
+          className={`h-full ${s.bar} rounded-full transition-all duration-1000 ease-in-out`}
           style={{ width: `${pct}%` }}
         />
       </div>
 
-      {/* Stats row */}
-      <div className="flex flex-wrap items-center justify-between text-xs font-semibold text-emerald-800 gap-2">
+      <div className={`flex flex-wrap items-center justify-between text-xs font-semibold ${s.textBold} gap-2`}>
         <span>{progress.completed.toLocaleString()} / {progress.total.toLocaleString()} rows ({pct}%)</span>
         <span>{progress.active_workers} / {progress.num_workers} workers active</span>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between text-xs text-emerald-700 gap-2">
+      <div className={`flex flex-wrap items-center justify-between text-xs ${s.textMid} gap-2`}>
         <span>{progress.successful.toLocaleString()} matched &middot; {progress.failed.toLocaleString()} failed</span>
         <span>
           {progress.avg_seconds_per_row > 0 && `${progress.avg_seconds_per_row}s/row`}
@@ -456,12 +694,11 @@ function ScrapingProgressPanel({ progress }: { progress: api.ScrapingProgress })
         </span>
       </div>
 
-      {/* Per-worker breakdown */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 pt-1">
         {progress.workers.map((w) => (
-          <div key={w.id} className="bg-white/60 border border-emerald-100 rounded-lg px-2.5 py-1.5 text-xs">
-            <div className="font-bold text-emerald-800">Worker {w.id + 1}</div>
-            <div className="text-emerald-600 truncate">
+          <div key={w.id} className={`bg-white/60 border ${s.workerBorder} rounded-lg px-2.5 py-1.5 text-xs`}>
+            <div className={`font-bold ${s.workerText}`}>Worker {w.id + 1}</div>
+            <div className={`${s.workerSubText} truncate`}>
               {w.completed} done · <span className="capitalize">{w.status}</span>
             </div>
           </div>
