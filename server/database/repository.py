@@ -173,6 +173,17 @@ def get_all_product_detail_links(engine) -> list[ImportedLink]:
         ).all()
 
 
+def get_all_search_links(engine) -> list[ImportedLink]:
+    """Return all ImportedLink rows where is_product_detail=False and not yet scraped."""
+    with Session(engine) as session:
+        return session.exec(
+            select(ImportedLink)
+            .where(ImportedLink.is_product_detail == False)
+            .where(ImportedLink.is_scraped == False)
+            .order_by(ImportedLink.id)
+        ).all()
+
+
 def mark_imported_link_scraped(engine, link_id: int):
     """Set is_scraped=True on the ImportedLink record."""
     with Session(engine) as session:

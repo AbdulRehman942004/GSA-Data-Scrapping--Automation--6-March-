@@ -62,20 +62,34 @@ def get_export_info() -> dict:
 
 def export_to_excel():
     """
-    Smart export: only include a sheet when that engine's scraped data exists.
+    Smart export.
 
-    Decision table
-    ──────────────────────────────────────────────────────────────
-    gsa_scraped_data   links_scraped_data   Sheets included
-    ─────────────────  ──────────────────── ─────────────────────
-    has records        empty                "GSA Parts Data" only
-    empty              has records          "Links Scraped Data" only
-    has records        has records          both sheets
-    empty              empty                → error (None returned)
-    ──────────────────────────────────────────────────────────────
+    Sheet decision table
+    ─────────────────────────────────────────────────────────────────────────────
+    GSA parts data     Internal scraped   External scraped   Sheets written
+    ─────────────────  ─────────────────  ─────────────────  ────────────────────
+    has records        –                  –                  "GSA Parts Data"
+    –                  has records        –                  "Internal Links"
+    –                  –                  has records        "External Links"
+    –                  has records        has records        both link sheets
+    has records        has records        has records        all three sheets
+    none               none               none               → None (error)
+    ─────────────────────────────────────────────────────────────────────────────
+
+    Internal Links sheet columns (one row per product-detail link):
+        Internal Link URL | Manufacturer Part Name |
+        GSA PRICE | Unit | Contractor | contract#: |          ← slot 1
+        GSA PRICE.1 | Unit.1 | Contractor.1 | contract#:.1 | ← slot 2  … up to slot 6
+
+    External Links sheet columns (one row per search/external link):
+        Manufacturer Part Number | External Link URL |
+        GSA PRICE | Unit | Manufacturer Part Name | Contractor | contract#: |   ← slot 1
+        GSA PRICE.1 | … up to slot 6
 
     Returns (BytesIO buffer, filename) on success, or None on failure.
     """
+    from collections import defaultdict
+
     try:
         engine = get_engine()
     except Exception as e:
@@ -84,146 +98,182 @@ def export_to_excel():
 
     try:
         with Session(engine) as session:
-            imported = session.exec(select(ImportedPart).order_by(ImportedPart.id)).all()
-            scraped = session.exec(select(GSAScrapedData)).all()
+            imported_parts = session.exec(select(ImportedPart).order_by(ImportedPart.id)).all()
+            scraped_parts  = session.exec(select(GSAScrapedData)).all()
 
-            # Only export scraped rows whose link_id exists in the CURRENT imported_links
-            # table. This is the hard session boundary: orphaned rows from past sessions
-            # (link_id no longer in imported_links) are silently excluded.
-            current_link_ids: set[int] = {
-                il.id for il in session.exec(select(ImportedLink)).all()
+            # Build link-type lookup: link_id → link_type ("internal" | "external")
+            # This is also the session boundary — only current-session link IDs allowed.
+            imported_links_all = session.exec(select(ImportedLink)).all()
+            link_type_map: dict[int, str] = {
+                il.id: il.link_type for il in imported_links_all
             }
-            links_scraped = session.exec(
+            current_link_ids: set[int] = set(link_type_map.keys())
+
+            links_scraped_raw = session.exec(
                 select(LinkScrapedData).order_by(
                     LinkScrapedData.link_id, LinkScrapedData.row_order
                 )
             ).all()
-            # Apply session filter in Python (works for any DB backend)
-            links_scraped = [r for r in links_scraped if r.link_id in current_link_ids]
 
-        has_parts_data = len(scraped) > 0
-        has_links_data = len(links_scraped) > 0
+        # Session filter: drop rows whose link_id is no longer in imported_links
+        links_scraped = [r for r in links_scraped_raw if r.link_id in current_link_ids]
+
+        # Split by link type
+        internal_scraped = [r for r in links_scraped if link_type_map.get(r.link_id) == "internal"]
+        external_scraped = [r for r in links_scraped if link_type_map.get(r.link_id) == "external"]
+
+        has_parts_data    = len(scraped_parts) > 0
+        has_internal_data = len(internal_scraped) > 0
+        has_external_data = len(external_scraped) > 0
 
         logger.info(
-            f"Export info: has_parts_data={has_parts_data} ({len(scraped)} records), "
-            f"has_links_data={has_links_data} ({len(links_scraped)} records)"
+            f"Export info: parts={len(scraped_parts)}, "
+            f"internal_links={len(internal_scraped)}, "
+            f"external_links={len(external_scraped)}"
         )
 
-        # Nothing to export at all
-        if not has_parts_data and not has_links_data:
-            logger.error(
-                "No scraped data found in either pipeline (gsa_scraped_data and "
-                "links_scraped_data are both empty). Run an extraction first."
-            )
+        if not has_parts_data and not has_internal_data and not has_external_data:
+            logger.error("No scraped data found. Run an extraction first.")
             return None
 
         timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         output_buffer = io.BytesIO()
 
-        def _val(d, key):
-            v = d.get(key)
-            return v if v is not None and not (isinstance(v, float) and pd.isna(v)) else ''
+        # Slot suffixes: "" for slot 1, ".1" … ".5" for slots 2–6
+        _MAX_SLOTS = 6
+        _SUFFIXES  = [""] + [f".{i}" for i in range(1, _MAX_SLOTS)]
+
+        def _v(val):
+            """Return empty string for None / NaN values."""
+            if val is None:
+                return ""
+            if isinstance(val, float) and pd.isna(val):
+                return ""
+            return val
+
+        def _pivot_internal(scraped_rows: list) -> pd.DataFrame:
+            """
+            Build the Internal Links sheet.
+
+            Columns: Internal Link URL | Manufacturer Part Name |
+                     GSA PRICE | Unit | Contractor | contract#:  (×6 slots)
+            """
+            groups: dict = defaultdict(list)
+            for r in scraped_rows:
+                groups[r.link_id].append(r)
+
+            pivoted = []
+            for link_id in sorted(groups.keys()):
+                rows = sorted(groups[link_id], key=lambda r: r.row_order)
+                base = rows[0]
+
+                record: dict = {
+                    "Internal Link URL":      _v(base.link),
+                    "Manufacturer Part Name": _v(base.manufacturer_part_name),
+                }
+                for i, sfx in enumerate(_SUFFIXES):
+                    if i < len(rows):
+                        r = rows[i]
+                        record[f"GSA PRICE{sfx}"]  = _v(r.price)
+                        record[f"Unit{sfx}"]        = _v(r.unit)
+                        record[f"Contractor{sfx}"]  = _v(r.contractor_name)
+                        record[f"contract#:{sfx}"]  = _v(r.contract_number)
+                    else:
+                        record[f"GSA PRICE{sfx}"]  = ""
+                        record[f"Unit{sfx}"]        = ""
+                        record[f"Contractor{sfx}"]  = ""
+                        record[f"contract#:{sfx}"]  = ""
+                pivoted.append(record)
+
+            return pd.DataFrame(pivoted)
+
+        def _pivot_external(scraped_rows: list) -> pd.DataFrame:
+            """
+            Build the External Links sheet.
+
+            Columns: Manufacturer Part Number | External Link URL |
+                     GSA PRICE | Unit | Manufacturer Part Name | Contractor | contract#:  (×6 slots)
+            """
+            groups: dict = defaultdict(list)
+            for r in scraped_rows:
+                groups[r.link_id].append(r)
+
+            pivoted = []
+            for link_id in sorted(groups.keys()):
+                rows = sorted(groups[link_id], key=lambda r: r.row_order)
+                base = rows[0]
+
+                record: dict = {
+                    "Manufacturer Part Number": _v(base.manufacturer_part_number),
+                    "External Link URL":        _v(base.link),
+                }
+                for i, sfx in enumerate(_SUFFIXES):
+                    if i < len(rows):
+                        r = rows[i]
+                        record[f"GSA PRICE{sfx}"]            = _v(r.price)
+                        record[f"Unit{sfx}"]                  = _v(r.unit)
+                        record[f"Manufacturer Part Name{sfx}"] = _v(r.manufacturer_part_name)
+                        record[f"Contractor{sfx}"]            = _v(r.contractor_name)
+                        record[f"contract#:{sfx}"]            = _v(r.contract_number)
+                    else:
+                        record[f"GSA PRICE{sfx}"]            = ""
+                        record[f"Unit{sfx}"]                  = ""
+                        record[f"Manufacturer Part Name{sfx}"] = ""
+                        record[f"Contractor{sfx}"]            = ""
+                        record[f"contract#:{sfx}"]            = ""
+                pivoted.append(record)
+
+            return pd.DataFrame(pivoted)
 
         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
 
-            # ── Sheet 1: GSA Parts Data (price extraction engine) ─────────────
+            # ── GSA Parts Data (price extraction pipeline) ────────────────────
             if has_parts_data:
                 rows = [
                     {"part_number": r.part_number, "manufacturer": r.manufacturer or ""}
-                    for r in imported
+                    for r in imported_parts
                 ]
                 df = pd.DataFrame(rows) if rows else pd.DataFrame(
                     columns=["part_number", "manufacturer"]
                 )
-
                 for col in ['1 GSA Low Price', 'Unit', 'Contractor:Name',
                             '2 GSA Low Price', 'Unit.1', 'Contractor:Name.1']:
                     df[col] = pd.Series([None] * len(df), dtype='object')
 
-                scraped_dict = {str(s.part_number).strip(): s for s in scraped}
+                scraped_dict = {str(s.part_number).strip(): s for s in scraped_parts}
                 matched = 0
                 for idx, row in df.iterrows():
                     pn = str(row['part_number']).strip()
                     if pn in scraped_dict:
                         s = scraped_dict[pn]
-                        d = {
-                            'gsa_low_price_1': s.gsa_low_price_1, 'unit_1': s.unit_1,
-                            'contractor_1': s.contractor_1,
-                            'gsa_low_price_2': s.gsa_low_price_2, 'unit_2': s.unit_2,
-                            'contractor_2': s.contractor_2,
-                        }
-                        df.at[idx, '1 GSA Low Price']   = _val(d, 'gsa_low_price_1')
-                        df.at[idx, 'Unit']               = _val(d, 'unit_1')
-                        df.at[idx, 'Contractor:Name']    = _val(d, 'contractor_1')
-                        df.at[idx, '2 GSA Low Price']    = _val(d, 'gsa_low_price_2')
-                        df.at[idx, 'Unit.1']             = _val(d, 'unit_2')
-                        df.at[idx, 'Contractor:Name.1']  = _val(d, 'contractor_2')
+                        df.at[idx, '1 GSA Low Price']   = _v(s.gsa_low_price_1)
+                        df.at[idx, 'Unit']               = _v(s.unit_1)
+                        df.at[idx, 'Contractor:Name']    = _v(s.contractor_1)
+                        df.at[idx, '2 GSA Low Price']    = _v(s.gsa_low_price_2)
+                        df.at[idx, 'Unit.1']             = _v(s.unit_2)
+                        df.at[idx, 'Contractor:Name.1']  = _v(s.contractor_2)
                         matched += 1
 
                 df.to_excel(writer, sheet_name="GSA Parts Data", index=False)
-                logger.info(f"Export Sheet 'GSA Parts Data': {matched} matched rows written")
+                logger.info(f"Export 'GSA Parts Data': {matched} row(s) matched")
 
-            # ── Sheet 2: Links Scraped Data (link extraction engine) ──────────
-            # One Excel row per product link.  Up to 6 comparison slots placed
-            # side-by-side using the column pattern (no suffix = slot 1):
-            #
-            #   Link URL | Mfr Part Name | Mfr Part Number |
-            #   GSA PRICE | Unit | Contractor | contract#: |      ← slot 1
-            #   GSA PRICE.1 | Unit.1 | Contractor.1 | contract#:.1 | … ← slot 2
-            #   … up to slot 6 (suffix .5)
-            if has_links_data:
-                from collections import defaultdict
+            # ── Internal Links (product-detail link extraction) ───────────────
+            if has_internal_data:
+                df_int = _pivot_internal(internal_scraped)
+                df_int.to_excel(writer, sheet_name="Internal Links", index=False)
+                logger.info(f"Export 'Internal Links': {len(df_int)} product row(s)")
 
-                # Group scraped rows by link_id, preserving row_order sort
-                link_groups: dict = defaultdict(list)
-                for r in links_scraped:
-                    link_groups[r.link_id].append(r)
+            # ── External Links (search/external link extraction) ──────────────
+            if has_external_data:
+                df_ext = _pivot_external(external_scraped)
+                df_ext.to_excel(writer, sheet_name="External Links", index=False)
+                logger.info(f"Export 'External Links': {len(df_ext)} product row(s)")
 
-                # Suffixes: "", ".1", ".2", ".3", ".4", ".5"
-                _max_slots = 6
-                _suffixes = [""] + [f".{i}" for i in range(1, _max_slots)]
-
-                pivoted_rows = []
-                for link_id in sorted(link_groups.keys()):
-                    rows = sorted(link_groups[link_id], key=lambda r: r.row_order)
-                    base = rows[0]
-
-                    record: dict = {
-                        "Link URL":                 base.link,
-                        "Manufacturer Part Name":   base.manufacturer_part_name or "",
-                        "Manufacturer Part Number": base.manufacturer_part_number or "",
-                    }
-
-                    for i, sfx in enumerate(_suffixes):
-                        if i < len(rows):
-                            r = rows[i]
-                            record[f"GSA PRICE{sfx}"]  = r.price if r.price is not None else ""
-                            record[f"Unit{sfx}"]        = r.unit or ""
-                            record[f"Contractor{sfx}"]  = r.contractor_name or ""
-                            record[f"contract#:{sfx}"]  = r.contract_number or ""
-                        else:
-                            record[f"GSA PRICE{sfx}"]  = ""
-                            record[f"Unit{sfx}"]        = ""
-                            record[f"Contractor{sfx}"]  = ""
-                            record[f"contract#:{sfx}"]  = ""
-
-                    pivoted_rows.append(record)
-
-                df_links = pd.DataFrame(pivoted_rows)
-                df_links.to_excel(writer, sheet_name="Links Scraped Data", index=False)
-                logger.info(
-                    f"Export Sheet 'Links Scraped Data': {len(df_links)} product row(s) "
-                    f"(session-filtered from {len(links_scraped)} scraped records, "
-                    f"{len(current_link_ids)} active links)"
-                )
-
-        # ── Choose a descriptive filename based on what was exported ──────────
-        if has_parts_data and has_links_data:
-            filename = f"gsa_full_export_{timestamp}.xlsx"
-        elif has_parts_data:
-            filename = f"gsa_parts_data_{timestamp}.xlsx"
-        else:
-            filename = f"gsa_links_data_{timestamp}.xlsx"
+        # ── Filename ──────────────────────────────────────────────────────────
+        parts_tag    = "parts_"    if has_parts_data    else ""
+        internal_tag = "internal_" if has_internal_data else ""
+        external_tag = "external_" if has_external_data else ""
+        filename = f"gsa_{parts_tag}{internal_tag}{external_tag}export_{timestamp}.xlsx"
 
         output_buffer.seek(0)
         logger.info(f"Export ready: {filename}")

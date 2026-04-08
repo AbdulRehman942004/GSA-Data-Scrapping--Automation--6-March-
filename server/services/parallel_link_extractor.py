@@ -124,28 +124,57 @@ class ParallelLinkExtractionOrchestrator:
     # ── public run modes ──────────────────────────────────────────────────────
 
     def run_full(self) -> bool:
-        """Process all unscraped product_detail links in parallel."""
+        """
+        Process all unscraped links in parallel.
+
+        Phase 1 – product_detail links  → InternalLinkScraper
+        Phase 2 – search/external links → SearchLinkScraper
+
+        Both phases run with the same worker pool size; they run sequentially
+        so that progress tracking stays accurate and Chrome memory usage stays
+        bounded.
+        """
         from database.db import get_engine
-        from database.repository import get_all_product_detail_links
-        links = get_all_product_detail_links(get_engine())
-        if not links:
+        from database.repository import get_all_product_detail_links, get_all_search_links
+
+        engine = get_engine()
+        product_links = get_all_product_detail_links(engine)
+        search_links = get_all_search_links(engine)
+
+        if not product_links and not search_links:
             logger.info("ParallelLinkExtractionOrchestrator: no links to process.")
             return True
-        return self._dispatch(links)
+
+        all_ok = True
+        if product_links:
+            logger.info(
+                f"Phase 1: dispatching {len(product_links)} product_detail link(s) "
+                f"to InternalLinkScraper workers."
+            )
+            all_ok &= self._dispatch(product_links, scraper_type="internal")
+
+        if search_links:
+            logger.info(
+                f"Phase 2: dispatching {len(search_links)} search link(s) "
+                f"to SearchLinkScraper workers."
+            )
+            all_ok &= self._dispatch(search_links, scraper_type="search")
+
+        return all_ok
 
     def run_test(self, item_limit: int = 3) -> bool:
-        """Process the first N unscraped links (for testing)."""
+        """Process the first N unscraped product_detail links (for testing)."""
         from database.db import get_engine
         from database.repository import get_all_product_detail_links
         links = get_all_product_detail_links(get_engine())[:item_limit]
         if not links:
             logger.info("ParallelLinkExtractionOrchestrator: no links to process.")
             return True
-        return self._dispatch(links)
+        return self._dispatch(links, scraper_type="internal")
 
     # ── internal ──────────────────────────────────────────────────────────────
 
-    def _dispatch(self, links: list) -> bool:
+    def _dispatch(self, links: list, scraper_type: str = "internal") -> bool:
         """Partition links across workers and run them concurrently."""
         total = len(links)
         actual_workers = min(self.num_workers, total)
@@ -155,17 +184,16 @@ class ParallelLinkExtractionOrchestrator:
         self.tracker = LinkExtractionProgressTracker(total, actual_workers)
 
         # Interleaved slicing: worker-0 gets [0,N,2N,...], worker-1 gets [1,N+1,...]
-        # This distributes work evenly even for small link counts.
         chunks = [links[i::actual_workers] for i in range(actual_workers)]
 
         logger.info(
-            f"Dispatching {total} links across {actual_workers} workers "
+            f"Dispatching {total} {scraper_type} link(s) across {actual_workers} worker(s) "
             f"(chunk sizes: {[len(c) for c in chunks]})"
         )
 
         self._executor = ThreadPoolExecutor(max_workers=actual_workers)
         futures = {
-            self._executor.submit(self._run_worker, wid, chunk): wid
+            self._executor.submit(self._run_worker, wid, chunk, scraper_type): wid
             for wid, chunk in enumerate(chunks)
         }
 
@@ -191,13 +219,12 @@ class ParallelLinkExtractionOrchestrator:
         )
         return all_success
 
-    def _run_worker(self, worker_id: int, links: list) -> int:
+    def _run_worker(self, worker_id: int, links: list, scraper_type: str = "internal") -> int:
         """
-        Single worker thread.  Creates its own InternalLinkScraper (and Chrome
-        driver), processes its partition of links, then shuts down cleanly.
+        Single worker thread.  Creates its own scraper (InternalLinkScraper for
+        product_detail links, SearchLinkScraper for search links), processes its
+        partition, then shuts down cleanly.
         """
-        from services.internal_link_scraper import InternalLinkScraper
-
         # Stagger startup so not all browsers launch simultaneously
         if worker_id > 0:
             stagger = worker_id * 3   # 3 s, 6 s, 9 s, 12 s
@@ -210,12 +237,22 @@ class ParallelLinkExtractionOrchestrator:
         def on_complete(link_url: str, success: bool):
             self.tracker.record(worker_id, link_url, success)
 
-        scraper = InternalLinkScraper(
-            sort_order=self.sort_order,
-            stop_event=self.stop_event,
-            on_row_complete=on_complete,
-            worker_id=worker_id,
-        )
+        if scraper_type == "search":
+            from services.search_link_scraper import SearchLinkScraper
+            scraper = SearchLinkScraper(
+                sort_order=self.sort_order,
+                stop_event=self.stop_event,
+                on_row_complete=on_complete,
+                worker_id=worker_id,
+            )
+        else:
+            from services.internal_link_scraper import InternalLinkScraper
+            scraper = InternalLinkScraper(
+                sort_order=self.sort_order,
+                stop_event=self.stop_event,
+                on_row_complete=on_complete,
+                worker_id=worker_id,
+            )
 
         try:
             return scraper.run_assigned_links(links)
