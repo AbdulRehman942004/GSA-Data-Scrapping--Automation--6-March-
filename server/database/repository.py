@@ -1,4 +1,5 @@
 from datetime import datetime
+from sqlalchemy import delete as _sql_delete
 from sqlmodel import Session, select
 from database.models import GSALink, GSAScrapedData, ImportedLink, ImportedPart, LinkScrapedData
 
@@ -109,11 +110,9 @@ def get_all_imported_parts(engine) -> list[ImportedPart]:
 # ── Imported links ─────────────────────────────────────────────
 
 def clear_imported_links(engine):
-    """Delete all rows from imported_links."""
+    """Delete all rows from imported_links in a single atomic SQL DELETE."""
     with Session(engine) as session:
-        records = session.exec(select(ImportedLink)).all()
-        for rec in records:
-            session.delete(rec)
+        session.exec(_sql_delete(ImportedLink))
         session.commit()
 
 
@@ -226,11 +225,9 @@ def get_all_links_scraped_data(engine) -> list[LinkScrapedData]:
 
 
 def clear_links_scraped_data(engine):
-    """Delete all rows from links_scraped_data."""
+    """Delete ALL rows from links_scraped_data in a single atomic SQL DELETE."""
     with Session(engine) as session:
-        records = session.exec(select(LinkScrapedData)).all()
-        for rec in records:
-            session.delete(rec)
+        session.exec(_sql_delete(LinkScrapedData))
         session.commit()
 
 

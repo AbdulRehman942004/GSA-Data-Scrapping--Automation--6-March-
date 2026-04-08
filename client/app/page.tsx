@@ -13,6 +13,7 @@ export default function Dashboard() {
   const [numWorkers, setNumWorkers] = useState(0);
   const [numLinkWorkers, setNumLinkWorkers] = useState(0);
   const [sortOrder, setSortOrder] = useState<'low_to_high' | 'high_to_low'>('low_to_high');
+  const [linkSortOrder, setLinkSortOrder] = useState<'low_to_high' | 'high_to_low'>('low_to_high');
   const [isExporting, setIsExporting] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isUploadingLinks, setIsUploadingLinks] = useState(false);
@@ -124,7 +125,7 @@ export default function Dashboard() {
     try {
       const workers = numLinkWorkers > 0 ? numLinkWorkers : undefined;
       toast.loading(`Initiating Link Extraction${workers ? ` (${workers} workers)` : ''}...`, { id: 'linkExtract' });
-      await api.startLinkExtraction({ sort_order: sortOrder, num_workers: workers });
+      await api.startLinkExtraction({ sort_order: linkSortOrder, num_workers: workers });
       toast.success("Link Extraction queued successfully!", { id: 'linkExtract' });
       fetchStatus();
     } catch (err: any) {
@@ -466,19 +467,6 @@ export default function Dashboard() {
 
             <div className="space-y-0 relative z-10">
 
-              {/* Shared: Price Sort */}
-              <div className="flex flex-col gap-2 pb-4">
-                <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Price Sort (shared)</label>
-                <select
-                  value={sortOrder}
-                  onChange={(e) => setSortOrder(e.target.value as 'low_to_high' | 'high_to_low')}
-                  disabled={status?.is_scraping_running || status?.is_link_extraction_running}
-                  className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-emerald-500/50 shadow-sm transition-all disabled:opacity-50"
-                >
-                  <option value="low_to_high">Low to High</option>
-                  <option value="high_to_low">High to Low</option>
-                </select>
-              </div>
 
               {/* ── Price Extraction sub-section ──────────────────────────── */}
               <div className="border-t border-slate-100 pt-4 space-y-3">
@@ -535,6 +523,19 @@ export default function Dashboard() {
                 <p className="text-xs uppercase font-bold text-indigo-700 tracking-wider flex items-center gap-1.5">
                   <Link className="w-3.5 h-3.5" /> Link Extraction — works on Import Links
                 </p>
+
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Price Sort Order</label>
+                  <select
+                    value={linkSortOrder}
+                    onChange={(e) => setLinkSortOrder(e.target.value as 'low_to_high' | 'high_to_low')}
+                    disabled={status?.is_link_extraction_running}
+                    className="bg-white border text-slate-700 font-medium border-slate-200 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:border-transparent focus:ring-indigo-500/50 shadow-sm transition-all disabled:opacity-50"
+                  >
+                    <option value="low_to_high">Low to High (top → bottom)</option>
+                    <option value="high_to_low">High to Low (bottom → top)</option>
+                  </select>
+                </div>
 
                 <div className="flex flex-col gap-2">
                   <label className="text-xs uppercase font-bold text-slate-500 tracking-wider">Parallel Workers</label>

@@ -9,7 +9,7 @@ from sqlmodel import Session, select
 # Ensure the root project dir is in sys.path so we can import modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.db import get_engine
-from database.models import GSAScrapedData, ImportedPart, LinkScrapedData
+from database.models import GSAScrapedData, ImportedLink, ImportedPart, LinkScrapedData
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +86,20 @@ def export_to_excel():
         with Session(engine) as session:
             imported = session.exec(select(ImportedPart).order_by(ImportedPart.id)).all()
             scraped = session.exec(select(GSAScrapedData)).all()
+
+            # Only export scraped rows whose link_id exists in the CURRENT imported_links
+            # table. This is the hard session boundary: orphaned rows from past sessions
+            # (link_id no longer in imported_links) are silently excluded.
+            current_link_ids: set[int] = {
+                il.id for il in session.exec(select(ImportedLink)).all()
+            }
             links_scraped = session.exec(
                 select(LinkScrapedData).order_by(
                     LinkScrapedData.link_id, LinkScrapedData.row_order
                 )
             ).all()
+            # Apply session filter in Python (works for any DB backend)
+            links_scraped = [r for r in links_scraped if r.link_id in current_link_ids]
 
         has_parts_data = len(scraped) > 0
         has_links_data = len(links_scraped) > 0
@@ -155,10 +164,13 @@ def export_to_excel():
                 logger.info(f"Export Sheet 'GSA Parts Data': {matched} matched rows written")
 
             # ── Sheet 2: Links Scraped Data (link extraction engine) ──────────
-            # Pivot: one Excel row per product link, with up to 6 price sets
-            # as side-by-side columns in the pattern:
-            #   GSA PRICE | Contractor | contract#: |
-            #   GSA PRICE.1 | Contractor.1 | contract#:.1 | … (up to .5)
+            # One Excel row per product link.  Up to 6 comparison slots placed
+            # side-by-side using the column pattern (no suffix = slot 1):
+            #
+            #   Link URL | Mfr Part Name | Mfr Part Number |
+            #   GSA PRICE | Unit | Contractor | contract#: |      ← slot 1
+            #   GSA PRICE.1 | Unit.1 | Contractor.1 | contract#:.1 | … ← slot 2
+            #   … up to slot 6 (suffix .5)
             if has_links_data:
                 from collections import defaultdict
 
@@ -167,9 +179,9 @@ def export_to_excel():
                 for r in links_scraped:
                     link_groups[r.link_id].append(r)
 
-                # Column suffixes for up to 6 rows: "", ".1", ".2", ".3", ".4", ".5"
-                _max_rows = 6
-                _suffixes = [""] + [f".{i}" for i in range(1, _max_rows)]
+                # Suffixes: "", ".1", ".2", ".3", ".4", ".5"
+                _max_slots = 6
+                _suffixes = [""] + [f".{i}" for i in range(1, _max_slots)]
 
                 pivoted_rows = []
                 for link_id in sorted(link_groups.keys()):
@@ -180,19 +192,20 @@ def export_to_excel():
                         "Link URL":                 base.link,
                         "Manufacturer Part Name":   base.manufacturer_part_name or "",
                         "Manufacturer Part Number": base.manufacturer_part_number or "",
-                        "Unit":                     base.unit or "",
                     }
 
                     for i, sfx in enumerate(_suffixes):
                         if i < len(rows):
                             r = rows[i]
                             record[f"GSA PRICE{sfx}"]  = r.price if r.price is not None else ""
-                            record[f"Contractor{sfx}"] = r.contractor_name or ""
-                            record[f"contract#:{sfx}"] = r.contract_number or ""
+                            record[f"Unit{sfx}"]        = r.unit or ""
+                            record[f"Contractor{sfx}"]  = r.contractor_name or ""
+                            record[f"contract#:{sfx}"]  = r.contract_number or ""
                         else:
                             record[f"GSA PRICE{sfx}"]  = ""
-                            record[f"Contractor{sfx}"] = ""
-                            record[f"contract#:{sfx}"] = ""
+                            record[f"Unit{sfx}"]        = ""
+                            record[f"Contractor{sfx}"]  = ""
+                            record[f"contract#:{sfx}"]  = ""
 
                     pivoted_rows.append(record)
 
@@ -200,7 +213,8 @@ def export_to_excel():
                 df_links.to_excel(writer, sheet_name="Links Scraped Data", index=False)
                 logger.info(
                     f"Export Sheet 'Links Scraped Data': {len(df_links)} product row(s) "
-                    f"pivoted from {len(links_scraped)} scraped record(s)"
+                    f"(session-filtered from {len(links_scraped)} scraped records, "
+                    f"{len(current_link_ids)} active links)"
                 )
 
         # ── Choose a descriptive filename based on what was exported ──────────

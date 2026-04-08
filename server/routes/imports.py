@@ -13,6 +13,7 @@ from database.repository import (
     clear_gsa_scraped_data,
     clear_imported_links,
     clear_imported_parts,
+    clear_links_scraped_data,
     get_imported_links_count,
     get_imported_parts_count,
 )
@@ -26,45 +27,64 @@ ALLOWED_EXTENSIONS = (".xlsx", ".xls")
 def _link_rows_from_dataframe(df: pd.DataFrame) -> list[dict]:
     """
     Map columns (case-insensitive) and build imported_links row dicts from one sheet.
-    Same rules as the original single-sheet import: internal column and/or external columns.
+
+    Handles:
+    - One or more "Internal Link URL" columns (including numbered variants such as
+      "Internal Link URL.1", "Internal Link URL 2", "Internal Link URL_3", etc.).
+      Every distinct URL found across all matching columns is added as its own row.
+    - "External Link URL" + "Manufacturer Part Number" (single column pair).
     """
-    col_map: dict[str, str] = {}
+    internal_link_cols: list[str] = []
+    external_link_col: str | None = None
+    part_number_col: str | None = None
+
     for col in df.columns:
         lower = str(col).strip().lower()
-        if lower == "internal link url":
-            col_map["internal_links"] = col
+        # Match "internal link url" and any suffixed variant (.1, _2, " 2", etc.)
+        if lower == "internal link url" or lower.startswith("internal link url"):
+            internal_link_cols.append(col)
         elif lower == "external link url":
-            col_map["external_links"] = col
+            external_link_col = col
         elif lower == "manufacturer part number":
-            col_map["part_number"] = col
+            part_number_col = col
 
-    has_internal = "internal_links" in col_map
-    has_external = "external_links" in col_map and "part_number" in col_map
+    has_internal = len(internal_link_cols) > 0
+    has_external = external_link_col is not None and part_number_col is not None
 
     if not has_internal and not has_external:
         return []
 
     records: list[dict] = []
+    seen_links: set[str] = set()  # deduplicate across columns/rows
 
+    # Process all internal link URL columns
     if has_internal:
-        for _, row in df.iterrows():
-            link = str(row[col_map["internal_links"]]).strip()
-            if not link or link.lower() == "nan":
-                continue
-            is_pd = "product_detail" in link.lower()
-            records.append({
-                "link": link,
-                "part_number": None,
-                "is_product_detail": is_pd,
-                "link_type": "internal",
-            })
+        for int_col in internal_link_cols:
+            for _, row in df.iterrows():
+                link = str(row[int_col]).strip()
+                if not link or link.lower() == "nan":
+                    continue
+                if link in seen_links:
+                    continue
+                seen_links.add(link)
+                is_pd = "product_detail" in link.lower()
+                records.append({
+                    "link": link,
+                    "part_number": None,
+                    "is_product_detail": is_pd,
+                    "link_type": "internal",
+                })
 
+    # Process external links
     if has_external:
         for _, row in df.iterrows():
-            link = str(row[col_map["external_links"]]).strip()
-            pn = str(row[col_map["part_number"]]).strip()
+            link = str(row[external_link_col]).strip()
+            pn = str(row[part_number_col]).strip()
             if not link or link.lower() == "nan":
                 continue
+            if link in seen_links:
+                continue
+            seen_links.add(link)
             if not pn or pn.lower() == "nan":
                 pn = None
             is_pd = "product_detail" in link.lower()
@@ -160,26 +180,20 @@ async def import_links(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(422, f"Could not read Excel file: {e}")
 
-    if len(xls.sheet_names) >= 2:
-        for idx, sheet in enumerate(xls.sheet_names[:2]):
-            try:
-                df = pd.read_excel(xls, sheet_name=sheet)
-            except Exception as e:
-                raise HTTPException(422, f"Could not read sheet {sheet!r}: {e}")
-            part = _link_rows_from_dataframe(df)
-            logger.info(
-                "Links import sheet %s (%r): %s row(s) parsed",
-                idx + 1,
-                sheet,
-                len(part),
-            )
-            records.extend(part)
-    else:
+    for idx, sheet in enumerate(xls.sheet_names):
         try:
-            df = pd.read_excel(BytesIO(contents))
+            df = pd.read_excel(xls, sheet_name=sheet)
         except Exception as e:
-            raise HTTPException(422, f"Could not read Excel file: {e}")
-        records = _link_rows_from_dataframe(df)
+            raise HTTPException(422, f"Could not read sheet {sheet!r}: {e}")
+        part = _link_rows_from_dataframe(df)
+        logger.info(
+            "Links import sheet %s/%s (%r): %s row(s) parsed",
+            idx + 1,
+            len(xls.sheet_names),
+            sheet,
+            len(part),
+        )
+        records.extend(part)
 
     if not records:
         sample_cols = []
@@ -197,6 +211,7 @@ async def import_links(file: UploadFile = File(...)):
 
     engine = get_engine()
     SQLModel.metadata.create_all(engine)
+    clear_links_scraped_data(engine)   # wipe previous session's scraped results
     clear_imported_links(engine)
     count = bulk_insert_imported_links(engine, records)
 

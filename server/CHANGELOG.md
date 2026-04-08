@@ -1,6 +1,9 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## v4.0.0 - 2026-04-08
+### Added
+Complete the functionality of import internal link from excel sheet
 
 ## v3.0.0 - 2026-03-27
 

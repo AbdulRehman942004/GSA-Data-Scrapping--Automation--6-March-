@@ -314,15 +314,13 @@ class InternalLinkScraper:
             time.sleep(2)
             self._wait_for_compare_table(timeout=10)
 
-            # ── Step 2: optionally sort descending ────────────────────────────
-            if self.sort_order == "high_to_low":
-                self._click_price_header_to_sort_descending()
-                time.sleep(1.5)
-
-            # ── Step 3: read manufacturer info from "Currently Selected" header
+            # ── Step 2: read manufacturer info from "Currently Selected" header
+            # NOTE: we do NOT click the Price column header to re-sort.
+            # Instead, _extract_all_compare_rows() reverses the row list when
+            # sort_order=="high_to_low", giving us the last 6 rows (highest prices).
             mfr_name, mfr_part_num = self._read_currently_selected_info()
 
-            # ── Step 4: extract all table rows ────────────────────────────────
+            # ── Step 3: extract all table rows ────────────────────────────────
             rows = self._extract_all_compare_rows(mfr_name, mfr_part_num)
             return rows
 
@@ -554,10 +552,25 @@ class InternalLinkScraper:
         mfr_name: Optional[str],
         mfr_part_num: Optional[str],
     ) -> list[dict]:
-        """Iterate every row in the compare table and build result dicts."""
+        """
+        Iterate rows in the compare table and build result dicts.
+
+        Ordering strategy (table is always low→high by default on GSA):
+          low_to_high  → read top→bottom, keep first 6 (cheapest 6)
+          high_to_low  → reverse the list, read top→bottom, keep first 6
+                         (= last 6 from original = most expensive 6)
+        """
         table_rows = self._find_compare_table_rows()
         if not table_rows:
             return []
+
+        if self.sort_order == "high_to_low":
+            table_rows = list(reversed(table_rows))
+            logger.info(f"{self._wid}sort_order=high_to_low → table rows reversed "
+                        f"({len(table_rows)} total), reading bottom→top.")
+        else:
+            logger.info(f"{self._wid}sort_order=low_to_high → reading top→bottom "
+                        f"({len(table_rows)} total rows).")
 
         results = []
 
