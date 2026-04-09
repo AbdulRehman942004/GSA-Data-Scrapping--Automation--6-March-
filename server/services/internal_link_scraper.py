@@ -305,7 +305,14 @@ class InternalLinkScraper:
             self._wait_for_page_ready(timeout=12)
             time.sleep(2)
 
-            # ── Step 1: click "Compare Available Sources" ─────────────────────
+            # ── Step 1: read Manufacturer Part Number from the 'About This Item'
+            #           specification table on the product detail page itself.
+            #           This is the most reliable source (always visible before
+            #           any modal interaction).
+            page_mfr_part_num = self._read_manufacturer_part_number_from_page()
+            logger.info(f"{self._wid}Page-level MPN: {page_mfr_part_num!r}")
+
+            # ── Step 2: click "Compare Available Sources" ─────────────────────
             if not self._click_compare_sources_button():
                 logger.warning(f"{self._wid}Compare button not found on: {url}")
                 return []
@@ -314,13 +321,16 @@ class InternalLinkScraper:
             time.sleep(2)
             self._wait_for_compare_table(timeout=10)
 
-            # ── Step 2: read manufacturer info from "Currently Selected" header
+            # ── Step 3: read manufacturer info from "Currently Selected" header
             # NOTE: we do NOT click the Price column header to re-sort.
             # Instead, _extract_all_compare_rows() reverses the row list when
             # sort_order=="high_to_low", giving us the last 6 rows (highest prices).
-            mfr_name, mfr_part_num = self._read_currently_selected_info()
+            mfr_name, modal_mfr_part_num = self._read_currently_selected_info()
 
-            # ── Step 3: extract all table rows ────────────────────────────────
+            # Page-level MPN takes priority; modal is the fallback.
+            mfr_part_num = page_mfr_part_num or modal_mfr_part_num
+
+            # ── Step 4: extract all table rows ────────────────────────────────
             rows = self._extract_all_compare_rows(mfr_name, mfr_part_num)
             return rows
 
@@ -381,6 +391,52 @@ class InternalLinkScraper:
             except (NoSuchElementException, Exception):
                 continue
         logger.warning(f"{self._wid}Price sort header not found — reading rows top→bottom regardless.")
+
+    # ── Page-level product info ───────────────────────────────────────────────
+
+    def _read_manufacturer_part_number_from_page(self) -> Optional[str]:
+        """
+        Extract Manufacturer Part Number from the product detail page's
+        'About This Item' specification table, which is visible before any
+        modal is opened.
+
+        The GSA Advantage product detail page renders a spec table like:
+
+            | Manufacturer Part Number | D5600XDAHC |
+            | Manufacturer             | PROMISE TECHNOLOGY |
+            | Country of Origin        | TAIWAN             |
+            ...
+
+        We try several DOM strategies to read the value cell adjacent to the
+        'Manufacturer Part Number' label.
+        """
+        selectors = [
+            # th label → sibling td value  (most common layout)
+            (By.XPATH,
+             "//th[contains(normalize-space(.),'Manufacturer Part Number')]"
+             "/following-sibling::td[1]"),
+            # td label → sibling td value  (alternative layout)
+            (By.XPATH,
+             "//td[contains(normalize-space(.),'Manufacturer Part Number')]"
+             "/following-sibling::td[1]"),
+            # dt/dd definition-list layout
+            (By.XPATH,
+             "//dt[contains(normalize-space(.),'Manufacturer Part Number')]"
+             "/following-sibling::dd[1]"),
+            # Angular-specific: label inside a div followed by value div
+            (By.XPATH,
+             "//*[contains(normalize-space(.),'Manufacturer Part Number')]"
+             "/following-sibling::*[1]"),
+        ]
+        for sel_type, sel_val in selectors:
+            try:
+                el = self.driver.find_element(sel_type, sel_val)
+                txt = el.text.strip()
+                if txt and txt.lower() not in ("manufacturer part number", ""):
+                    return txt
+            except (NoSuchElementException, Exception):
+                continue
+        return None
 
     # ── Currently Selected header ─────────────────────────────────────────────
 

@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import re
 import sys
 import io
 import logging
@@ -12,6 +13,26 @@ from database.db import get_engine
 from database.models import GSAScrapedData, ImportedLink, ImportedPart, LinkScrapedData
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_variation(card_pn: str, imported_pn: str) -> str:
+    """
+    Compare a card's scraped part number against the imported (target) part number.
+
+    Returns:
+        "Same"      – exact case-insensitive match
+        "Different" – match only after stripping all non-alphanumeric characters
+        ""          – no match or either value is empty
+    """
+    if not card_pn or not imported_pn:
+        return ""
+    if card_pn.strip().upper() == imported_pn.strip().upper():
+        return "Same"
+    norm_card     = re.sub(r"[^A-Z0-9]", "", card_pn.upper())
+    norm_imported = re.sub(r"[^A-Z0-9]", "", imported_pn.upper())
+    if norm_card and norm_imported and norm_card == norm_imported:
+        return "Different"
+    return ""
 
 
 def get_export_info() -> dict:
@@ -101,11 +122,17 @@ def export_to_excel():
             imported_parts = session.exec(select(ImportedPart).order_by(ImportedPart.id)).all()
             scraped_parts  = session.exec(select(GSAScrapedData)).all()
 
-            # Build link-type lookup: link_id → link_type ("internal" | "external")
-            # This is also the session boundary — only current-session link IDs allowed.
+            # Build per-link lookups from imported_links.
+            # link_type_map  : link_id → "internal" | "external"  (used for tab routing)
+            # link_import_pn : link_id → imported part_number      (used for Part Variation)
+            # current_link_ids is the session boundary: orphan rows from prior sessions
+            # whose link_id no longer exists in imported_links are silently excluded.
             imported_links_all = session.exec(select(ImportedLink)).all()
             link_type_map: dict[int, str] = {
                 il.id: il.link_type for il in imported_links_all
+            }
+            link_import_pn: dict[int, str] = {
+                il.id: (il.part_number or "") for il in imported_links_all
             }
             current_link_ids: set[int] = set(link_type_map.keys())
 
@@ -156,7 +183,12 @@ def export_to_excel():
             Build the Internal Links sheet.
 
             Columns: Internal Link URL | Manufacturer Part Name |
+                     Manufacturer Part Number |
                      GSA PRICE | Unit | Contractor | contract#:  (×6 slots)
+
+            The Manufacturer Part Number is extracted from the product detail
+            page's 'About This Item' specification table and stored once per
+            link (same value across all slots for a given product).
             """
             groups: dict = defaultdict(list)
             for r in scraped_rows:
@@ -168,8 +200,9 @@ def export_to_excel():
                 base = rows[0]
 
                 record: dict = {
-                    "Internal Link URL":      _v(base.link),
-                    "Manufacturer Part Name": _v(base.manufacturer_part_name),
+                    "Internal Link URL":        _v(base.link),
+                    "Manufacturer Part Name":   _v(base.manufacturer_part_name),
+                    "Manufacturer Part Number": _v(base.manufacturer_part_number),
                 }
                 for i, sfx in enumerate(_SUFFIXES):
                     if i < len(rows):
@@ -187,12 +220,20 @@ def export_to_excel():
 
             return pd.DataFrame(pivoted)
 
-        def _pivot_external(scraped_rows: list) -> pd.DataFrame:
+        def _pivot_external(scraped_rows: list, import_pn_map: dict) -> pd.DataFrame:
             """
             Build the External Links sheet.
 
-            Columns: Manufacturer Part Number | External Link URL |
-                     GSA PRICE | Unit | Manufacturer Part Name | Contractor | contract#:  (×6 slots)
+            Columns: Manufacturer Part Number (imported) | External Link URL |
+                     GSA PRICE | Unit | Manufacturer Part Name |
+                     Manufacturer Part Number | Part Variation |
+                     Contractor | contract#:  (×6 slots)
+
+            Per-slot 'Manufacturer Part Number' is the part number scraped
+            from that specific search-result card.
+            'Part Variation' is "Same" when the card PN exactly matches the
+            imported PN (case-insensitive), or "Different" when it matches
+            only after stripping special characters.
             """
             groups: dict = defaultdict(list)
             for r in scraped_rows:
@@ -203,24 +244,32 @@ def export_to_excel():
                 rows = sorted(groups[link_id], key=lambda r: r.row_order)
                 base = rows[0]
 
+                # The imported (target) part number for this link
+                imported_pn = import_pn_map.get(link_id, "") or _v(base.manufacturer_part_number)
+
                 record: dict = {
-                    "Manufacturer Part Number": _v(base.manufacturer_part_number),
+                    "Manufacturer Part Number": imported_pn,
                     "External Link URL":        _v(base.link),
                 }
                 for i, sfx in enumerate(_SUFFIXES):
                     if i < len(rows):
                         r = rows[i]
-                        record[f"GSA PRICE{sfx}"]            = _v(r.price)
-                        record[f"Unit{sfx}"]                  = _v(r.unit)
-                        record[f"Manufacturer Part Name{sfx}"] = _v(r.manufacturer_part_name)
-                        record[f"Contractor{sfx}"]            = _v(r.contractor_name)
-                        record[f"contract#:{sfx}"]            = _v(r.contract_number)
+                        card_pn = _v(r.manufacturer_part_number)
+                        record[f"GSA PRICE{sfx}"]              = _v(r.price)
+                        record[f"Unit{sfx}"]                    = _v(r.unit)
+                        record[f"Manufacturer Part Name{sfx}"]  = _v(r.manufacturer_part_name)
+                        record[f"Manufacturer Part Number{sfx}"] = card_pn
+                        record[f"Part Variation{sfx}"]          = _compute_variation(card_pn, imported_pn)
+                        record[f"Contractor{sfx}"]              = _v(r.contractor_name)
+                        record[f"contract#:{sfx}"]              = _v(r.contract_number)
                     else:
-                        record[f"GSA PRICE{sfx}"]            = ""
-                        record[f"Unit{sfx}"]                  = ""
-                        record[f"Manufacturer Part Name{sfx}"] = ""
-                        record[f"Contractor{sfx}"]            = ""
-                        record[f"contract#:{sfx}"]            = ""
+                        record[f"GSA PRICE{sfx}"]              = ""
+                        record[f"Unit{sfx}"]                    = ""
+                        record[f"Manufacturer Part Name{sfx}"]  = ""
+                        record[f"Manufacturer Part Number{sfx}"] = ""
+                        record[f"Part Variation{sfx}"]          = ""
+                        record[f"Contractor{sfx}"]              = ""
+                        record[f"contract#:{sfx}"]              = ""
                 pivoted.append(record)
 
             return pd.DataFrame(pivoted)
@@ -265,7 +314,7 @@ def export_to_excel():
 
             # ── External Links (search/external link extraction) ──────────────
             if has_external_data:
-                df_ext = _pivot_external(external_scraped)
+                df_ext = _pivot_external(external_scraped, link_import_pn)
                 df_ext.to_excel(writer, sheet_name="External Links", index=False)
                 logger.info(f"Export 'External Links': {len(df_ext)} product row(s)")
 

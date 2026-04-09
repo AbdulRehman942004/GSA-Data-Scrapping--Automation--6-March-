@@ -409,9 +409,16 @@ class SearchLinkScraper:
             contract_number = self._parse_contract_number_dom(card) or self._parse_contract_number_text(text)
             product_title = self._parse_product_title(card, text, link_rec.part_number)
 
+            # Extract the actual part number shown on this specific card.
+            # This lets the export layer compare it against the imported part number
+            # and compute the "Part Variation" (Same / Different).
+            card_part_number = self._extract_part_number_from_card(card) or link_rec.part_number
+
             return {
                 "manufacturer_part_name": mfr_name or product_title,
-                "manufacturer_part_number": link_rec.part_number,
+                # Store the card's own part number (not the imported one) so the
+                # export can detect Same vs Different variations per slot.
+                "manufacturer_part_number": card_part_number,
                 "price": price,
                 "unit": unit,
                 "contractor_name": contractor_name,
