@@ -216,6 +216,7 @@ def insert_link_scraped_rows(engine, link_id: int, link_url: str, rows: list[dic
                 link=link_url,
                 manufacturer_part_name=row.get("manufacturer_part_name"),
                 manufacturer_part_number=row.get("manufacturer_part_number"),
+                product_name=row.get("product_name"),
                 price=row.get("price"),
                 unit=row.get("unit"),
                 contractor_name=row.get("contractor_name"),

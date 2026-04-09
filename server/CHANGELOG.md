@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## v4.1.2 - 2026-04-08
 ### Added
-Hightlighted the headings of internal and external link columns for better understanding
+Hightlighted the headings of internal and external link columns for better understandingd 
 
 ## v4.1.1 - 2026-04-08
 ### Added

@@ -35,6 +35,10 @@ async def lifespan(app: FastAPI):
             conn.execute(text(
                 "ALTER TABLE imported_links ADD COLUMN IF NOT EXISTS is_scraped BOOLEAN DEFAULT FALSE"
             ))
+            # Product name scraped from the itemName span on search result cards
+            conn.execute(text(
+                "ALTER TABLE links_scraped_data ADD COLUMN IF NOT EXISTS product_name VARCHAR DEFAULT NULL"
+            ))
             conn.commit()
         logger.info("Database migrations completed successfully.")
     except Exception as e:

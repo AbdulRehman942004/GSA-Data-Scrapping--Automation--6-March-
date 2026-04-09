@@ -408,6 +408,7 @@ class SearchLinkScraper:
             contractor_name = self._parse_contractor_name(text)
             contract_number = self._parse_contract_number_dom(card) or self._parse_contract_number_text(text)
             product_title = self._parse_product_title(card, text, link_rec.part_number)
+            product_name = self._extract_product_name_dom(card)
 
             # Extract the actual part number shown on this specific card.
             # This lets the export layer compare it against the imported part number
@@ -419,6 +420,7 @@ class SearchLinkScraper:
                 # Store the card's own part number (not the imported one) so the
                 # export can detect Same vs Different variations per slot.
                 "manufacturer_part_number": card_part_number,
+                "product_name": product_name,
                 "price": price,
                 "unit": unit,
                 "contractor_name": contractor_name,
@@ -430,6 +432,39 @@ class SearchLinkScraper:
             return None
 
     # ── field parsers ─────────────────────────────────────────────────────────
+
+    def _extract_product_name_dom(self, card) -> Optional[str]:
+        """
+        Extract the product title shown on the card.
+
+        GSA Advantage renders item names as:
+            <span class="itemName" aria-label="Item Name - Tower NAS 2 bay ARM">
+              <a ...><b><span>Tower NAS 2 bay ARM</span></b></a>
+            </span>
+
+        We try the inner <b><span> text first, then the aria-label, then the
+        raw span text as a final fallback.
+        """
+        try:
+            el = card.find_element(By.CSS_SELECTOR, "span.itemName a b span")
+            txt = el.text.strip()
+            if txt:
+                return txt
+        except Exception:
+            pass
+        try:
+            el = card.find_element(By.CSS_SELECTOR, "span.itemName")
+            aria = (el.get_attribute("aria-label") or "").strip()
+            if aria:
+                m = re.match(r"Item\s+Name\s*[-–]\s*(.+)", aria, re.IGNORECASE)
+                if m:
+                    return m.group(1).strip()
+            txt = el.text.strip()
+            if txt:
+                return txt
+        except Exception:
+            pass
+        return None
 
     def _extract_manufacturer_dom(self, card) -> Optional[str]:
         """

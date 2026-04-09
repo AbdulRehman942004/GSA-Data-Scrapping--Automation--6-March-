@@ -200,7 +200,6 @@ def export_to_excel():
                 base = rows[0]
 
                 record: dict = {
-                    "Internal Link URL":        _v(base.link),
                     "Manufacturer Part Name":   _v(base.manufacturer_part_name),
                     "Manufacturer Part Number": _v(base.manufacturer_part_number),
                 }
@@ -216,6 +215,7 @@ def export_to_excel():
                         record[f"Unit{sfx}"]        = ""
                         record[f"Contractor{sfx}"]  = ""
                         record[f"contract#:{sfx}"]  = ""
+                    record[f"___SEP_{i}"] = ""
                 pivoted.append(record)
 
             return pd.DataFrame(pivoted)
@@ -249,27 +249,29 @@ def export_to_excel():
 
                 record: dict = {
                     "Manufacturer Part Number": imported_pn,
-                    "External Link URL":        _v(base.link),
                 }
                 for i, sfx in enumerate(_SUFFIXES):
                     if i < len(rows):
                         r = rows[i]
                         card_pn = _v(r.manufacturer_part_number)
-                        record[f"GSA PRICE{sfx}"]              = _v(r.price)
-                        record[f"Unit{sfx}"]                    = _v(r.unit)
-                        record[f"Manufacturer Part Name{sfx}"]  = _v(r.manufacturer_part_name)
+                        record[f"GSA PRICE{sfx}"]               = _v(r.price)
+                        record[f"Unit{sfx}"]                     = _v(r.unit)
+                        record[f"Manufacturer Part Name{sfx}"]   = _v(r.manufacturer_part_name)
+                        record[f"Product Name{sfx}"]             = _v(r.product_name)
                         record[f"Manufacturer Part Number{sfx}"] = card_pn
-                        record[f"Part Variation{sfx}"]          = _compute_variation(card_pn, imported_pn)
-                        record[f"Contractor{sfx}"]              = _v(r.contractor_name)
-                        record[f"contract#:{sfx}"]              = _v(r.contract_number)
+                        record[f"Part Variation{sfx}"]           = _compute_variation(card_pn, imported_pn)
+                        record[f"Contractor{sfx}"]               = _v(r.contractor_name)
+                        record[f"contract#:{sfx}"]               = _v(r.contract_number)
                     else:
-                        record[f"GSA PRICE{sfx}"]              = ""
-                        record[f"Unit{sfx}"]                    = ""
-                        record[f"Manufacturer Part Name{sfx}"]  = ""
+                        record[f"GSA PRICE{sfx}"]               = ""
+                        record[f"Unit{sfx}"]                     = ""
+                        record[f"Manufacturer Part Name{sfx}"]   = ""
+                        record[f"Product Name{sfx}"]             = ""
                         record[f"Manufacturer Part Number{sfx}"] = ""
-                        record[f"Part Variation{sfx}"]          = ""
-                        record[f"Contractor{sfx}"]              = ""
-                        record[f"contract#:{sfx}"]              = ""
+                        record[f"Part Variation{sfx}"]           = ""
+                        record[f"Contractor{sfx}"]               = ""
+                        record[f"contract#:{sfx}"]               = ""
+                    record[f"___SEP_{i}"] = ""
                 pivoted.append(record)
 
             return pd.DataFrame(pivoted)
@@ -281,9 +283,26 @@ def export_to_excel():
             white_bold = Font(bold=True, color="FFFFFF")
             center     = Alignment(horizontal="center", vertical="center")
             for cell in ws[1]:
+                if cell.value and str(cell.value).startswith("___SEP_"):
+                    continue
                 cell.fill      = blue_fill
                 cell.font      = white_bold
                 cell.alignment = center
+
+        def _apply_separator_fill(ws):
+            """Fill every cell in ___SEP_ columns solid black and clear their values."""
+            from openpyxl.styles import PatternFill
+            black_fill = PatternFill(fill_type="solid", fgColor="000000")
+            sep_col_indices = [
+                cell.column for cell in ws[1]
+                if cell.value and str(cell.value).startswith("___SEP_")
+            ]
+            max_row = max(ws.max_row, 1)
+            for col_idx in sep_col_indices:
+                for row_idx in range(1, max_row + 1):
+                    c = ws.cell(row=row_idx, column=col_idx)
+                    c.fill  = black_fill
+                    c.value = None
 
         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
 
@@ -323,6 +342,7 @@ def export_to_excel():
                 df_int = _pivot_internal(internal_scraped)
                 df_int.to_excel(writer, sheet_name="Internal Links", index=False)
                 _style_header(writer.sheets["Internal Links"])
+                _apply_separator_fill(writer.sheets["Internal Links"])
                 logger.info(f"Export 'Internal Links': {len(df_int)} product row(s)")
 
             # ── External Links (search/external link extraction) ──────────────
@@ -330,6 +350,7 @@ def export_to_excel():
                 df_ext = _pivot_external(external_scraped, link_import_pn)
                 df_ext.to_excel(writer, sheet_name="External Links", index=False)
                 _style_header(writer.sheets["External Links"])
+                _apply_separator_fill(writer.sheets["External Links"])
                 logger.info(f"Export 'External Links': {len(df_ext)} product row(s)")
 
         # ── Filename ──────────────────────────────────────────────────────────

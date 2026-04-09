@@ -50,6 +50,7 @@ class LinkScrapedData(SQLModel, table=True):
     link: str = Field()                                       # the original product detail URL
     manufacturer_part_name: Optional[str] = Field(default=None, nullable=True)
     manufacturer_part_number: Optional[str] = Field(default=None, nullable=True)
+    product_name: Optional[str] = Field(default=None, nullable=True)
     price: Optional[float] = Field(default=None, nullable=True)
     unit: Optional[str] = Field(default=None, nullable=True)
     contractor_name: Optional[str] = Field(default=None, nullable=True)
