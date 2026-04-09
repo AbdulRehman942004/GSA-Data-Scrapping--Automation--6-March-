@@ -1,7 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
-## v4.0.1 - 2026-04-08
+
+## v4.1.2 - 2026-04-08
+### Added
+Hightlighted the headings of internal and external link columns for better understanding
+
+## v4.1.1 - 2026-04-08
+### Added
+Added maunfactorer part number in internal and external link
+
+## v4.1.0 - 2026-04-08
 ### Added
 Complete the functionality of import external link from excel sheet
 

@@ -274,6 +274,17 @@ def export_to_excel():
 
             return pd.DataFrame(pivoted)
 
+        def _style_header(ws):
+            """Apply blue background with bold white text to the header row of a worksheet."""
+            from openpyxl.styles import PatternFill, Font, Alignment
+            blue_fill  = PatternFill(fill_type="solid", fgColor="1F4E79")
+            white_bold = Font(bold=True, color="FFFFFF")
+            center     = Alignment(horizontal="center", vertical="center")
+            for cell in ws[1]:
+                cell.fill      = blue_fill
+                cell.font      = white_bold
+                cell.alignment = center
+
         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
 
             # ── GSA Parts Data (price extraction pipeline) ────────────────────
@@ -304,18 +315,21 @@ def export_to_excel():
                         matched += 1
 
                 df.to_excel(writer, sheet_name="GSA Parts Data", index=False)
+                _style_header(writer.sheets["GSA Parts Data"])
                 logger.info(f"Export 'GSA Parts Data': {matched} row(s) matched")
 
             # ── Internal Links (product-detail link extraction) ───────────────
             if has_internal_data:
                 df_int = _pivot_internal(internal_scraped)
                 df_int.to_excel(writer, sheet_name="Internal Links", index=False)
+                _style_header(writer.sheets["Internal Links"])
                 logger.info(f"Export 'Internal Links': {len(df_int)} product row(s)")
 
             # ── External Links (search/external link extraction) ──────────────
             if has_external_data:
                 df_ext = _pivot_external(external_scraped, link_import_pn)
                 df_ext.to_excel(writer, sheet_name="External Links", index=False)
+                _style_header(writer.sheets["External Links"])
                 logger.info(f"Export 'External Links': {len(df_ext)} product row(s)")
 
         # ── Filename ──────────────────────────────────────────────────────────
