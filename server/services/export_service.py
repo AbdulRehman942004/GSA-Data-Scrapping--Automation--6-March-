@@ -224,16 +224,22 @@ def export_to_excel():
             """
             Build the External Links sheet.
 
-            Columns: Manufacturer Part Number (imported) | External Link URL |
-                     GSA PRICE | Unit | Manufacturer Part Name |
-                     Manufacturer Part Number | Part Variation |
-                     Contractor | contract#:  (×6 slots)
+            Column layout:
+              Col A : Imported Part Number  ← reference PN from the uploaded file (yellow)
 
-            Per-slot 'Manufacturer Part Number' is the part number scraped
-            from that specific search-result card.
-            'Part Variation' is "Same" when the card PN exactly matches the
-            imported PN (case-insensitive), or "Different" when it matches
-            only after stripping special characters.
+              Per slot (×6), separated by a black ___SEP_ column:
+                Part Variation           (yellow)
+                Manufacturer Part Number (yellow)  ← card's scraped PN
+                Manufacturer Part Name   (yellow)
+                Product Name             (blue)
+                GSA PRICE                (blue)
+                Unit                     (blue)
+                Contractor               (blue)
+                contract#:               (blue)
+
+            'Part Variation' is "Same" for an exact case-insensitive match against
+            the imported PN, or "Different" when the match requires stripping
+            special characters.
             """
             groups: dict = defaultdict(list)
             for r in scraped_rows:
@@ -244,31 +250,33 @@ def export_to_excel():
                 rows = sorted(groups[link_id], key=lambda r: r.row_order)
                 base = rows[0]
 
-                # The imported (target) part number for this link
                 imported_pn = import_pn_map.get(link_id, "") or _v(base.manufacturer_part_number)
 
+                # Col A: the reference PN from the uploaded import file
                 record: dict = {
-                    "Manufacturer Part Number": imported_pn,
+                    "Imported Part Number": imported_pn,
                 }
                 for i, sfx in enumerate(_SUFFIXES):
                     if i < len(rows):
                         r = rows[i]
                         card_pn = _v(r.manufacturer_part_number)
+                        # --- yellow columns first ---
+                        record[f"Part Variation{sfx}"]           = _compute_variation(card_pn, imported_pn)
+                        record[f"Manufacturer Part Number{sfx}"] = card_pn
+                        record[f"Manufacturer Part Name{sfx}"]   = _v(r.manufacturer_part_name)
+                        # --- blue columns after ---
+                        record[f"Product Name{sfx}"]             = _v(r.product_name)
                         record[f"GSA PRICE{sfx}"]               = _v(r.price)
                         record[f"Unit{sfx}"]                     = _v(r.unit)
-                        record[f"Manufacturer Part Name{sfx}"]   = _v(r.manufacturer_part_name)
-                        record[f"Product Name{sfx}"]             = _v(r.product_name)
-                        record[f"Manufacturer Part Number{sfx}"] = card_pn
-                        record[f"Part Variation{sfx}"]           = _compute_variation(card_pn, imported_pn)
                         record[f"Contractor{sfx}"]               = _v(r.contractor_name)
                         record[f"contract#:{sfx}"]               = _v(r.contract_number)
                     else:
-                        record[f"GSA PRICE{sfx}"]               = ""
-                        record[f"Unit{sfx}"]                     = ""
+                        record[f"Part Variation{sfx}"]           = ""
+                        record[f"Manufacturer Part Number{sfx}"] = ""
                         record[f"Manufacturer Part Name{sfx}"]   = ""
                         record[f"Product Name{sfx}"]             = ""
-                        record[f"Manufacturer Part Number{sfx}"] = ""
-                        record[f"Part Variation{sfx}"]           = ""
+                        record[f"GSA PRICE{sfx}"]               = ""
+                        record[f"Unit{sfx}"]                     = ""
                         record[f"Contractor{sfx}"]               = ""
                         record[f"contract#:{sfx}"]               = ""
                     record[f"___SEP_{i}"] = ""
@@ -288,6 +296,57 @@ def export_to_excel():
                 cell.fill      = blue_fill
                 cell.font      = white_bold
                 cell.alignment = center
+
+        def _style_header_internal(ws):
+            """
+            Style the Internal Links header row:
+              - First two non-separator columns (A=Manufacturer Part Name,
+                B=Manufacturer Part Number) → yellow, bold black text
+              - Remaining columns → light-blue, bold black text
+              - ___SEP_ columns are skipped (handled by _apply_separator_fill)
+            """
+            from openpyxl.styles import PatternFill, Font, Alignment
+            yellow_fill     = PatternFill(fill_type="solid", fgColor="FFFF00")
+            light_blue_fill = PatternFill(fill_type="solid", fgColor="9DC3E6")
+            bold_black      = Font(bold=True, color="000000")
+            center          = Alignment(horizontal="center", vertical="center")
+
+            non_sep_idx = 0
+            for cell in ws[1]:
+                if cell.value and str(cell.value).startswith("___SEP_"):
+                    continue
+                cell.font      = bold_black
+                cell.alignment = center
+                cell.fill      = yellow_fill if non_sep_idx < 2 else light_blue_fill
+                non_sep_idx   += 1
+
+        def _style_header_external(ws):
+            """
+            Style the External Links header row:
+              - Manufacturer Part Name, Manufacturer Part Number, Part Variation
+                (base column and all per-slot suffixed variants) → yellow, bold black text
+              - All other non-separator columns → light-blue, bold black text
+              - ___SEP_ columns are skipped (handled by _apply_separator_fill)
+            """
+            import re as _re
+            from openpyxl.styles import PatternFill, Font, Alignment
+            yellow_fill     = PatternFill(fill_type="solid", fgColor="FFFF00")
+            light_blue_fill = PatternFill(fill_type="solid", fgColor="9DC3E6")
+            bold_black      = Font(bold=True, color="000000")
+            center          = Alignment(horizontal="center", vertical="center")
+            yellow_cols     = {
+                "Imported Part Number",
+                "Part Variation",
+            }
+
+            for cell in ws[1]:
+                if cell.value and str(cell.value).startswith("___SEP_"):
+                    continue
+                cell.font      = bold_black
+                cell.alignment = center
+                # Strip slot suffix (.1, .2 …) before comparing
+                base_name = _re.sub(r'\.\d+$', '', str(cell.value or ""))
+                cell.fill = yellow_fill if base_name in yellow_cols else light_blue_fill
 
         def _apply_separator_fill(ws):
             """Fill every cell in ___SEP_ columns solid black and clear their values."""
@@ -341,7 +400,7 @@ def export_to_excel():
             if has_internal_data:
                 df_int = _pivot_internal(internal_scraped)
                 df_int.to_excel(writer, sheet_name="Internal Links", index=False)
-                _style_header(writer.sheets["Internal Links"])
+                _style_header_internal(writer.sheets["Internal Links"])
                 _apply_separator_fill(writer.sheets["Internal Links"])
                 logger.info(f"Export 'Internal Links': {len(df_int)} product row(s)")
 
@@ -349,7 +408,7 @@ def export_to_excel():
             if has_external_data:
                 df_ext = _pivot_external(external_scraped, link_import_pn)
                 df_ext.to_excel(writer, sheet_name="External Links", index=False)
-                _style_header(writer.sheets["External Links"])
+                _style_header_external(writer.sheets["External Links"])
                 _apply_separator_fill(writer.sheets["External Links"])
                 logger.info(f"Export 'External Links': {len(df_ext)} product row(s)")
 
