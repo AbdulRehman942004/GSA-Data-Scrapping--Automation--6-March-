@@ -349,16 +349,40 @@ class SearchLinkScraper:
         """
         Return cards whose visible part number normalizes to the same string as
         target_pn.  If target_pn is empty, return all cards.
+
+        Matching is done in two passes:
+          1. Primary  – extract via _extract_part_number_from_card, then
+                        normalize and compare.  Handles hyphens, dots, slashes.
+          2. Fallback – scan the first 8 lines of raw card text and normalize
+                        each line.  Catches part numbers shown with extra spaces
+                        (e.g. "AFL3 1TB" should match imported "AFL3-1TB") that
+                        the primary extractor's regex would otherwise skip.
         """
         if not target_pn:
             return list(cards)
 
         norm_target = _normalize_part_number(target_pn)
+        if not norm_target:
+            return list(cards)
+
         matched = []
         for card in cards:
+            # ── Pass 1: dedicated extractor ───────────────────────────────────
             card_pn = self._extract_part_number_from_card(card)
             if card_pn and _normalize_part_number(card_pn) == norm_target:
                 matched.append(card)
+                continue
+
+            # ── Pass 2: raw text scan (handles spaces + any special chars) ────
+            try:
+                for line in card.text.splitlines()[:8]:
+                    line = line.strip()
+                    if line and _normalize_part_number(line) == norm_target:
+                        matched.append(card)
+                        break
+            except Exception:
+                pass
+
         return matched
 
     def _extract_part_number_from_card(self, card) -> str:
