@@ -5,6 +5,7 @@ import sys
 import io
 import logging
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs
 from sqlmodel import Session, select
 
 # Ensure the root project dir is in sys.path so we can import modules
@@ -149,14 +150,29 @@ def export_to_excel():
         internal_scraped = [r for r in links_scraped if link_type_map.get(r.link_id) == "internal"]
         external_scraped = [r for r in links_scraped if link_type_map.get(r.link_id) == "external"]
 
+        # Links that were attempted (is_scraped=True) but produced zero rows
+        scraped_link_ids: set[int] = {r.link_id for r in links_scraped}
+        failed_internal_links = [
+            il for il in imported_links_all
+            if il.is_scraped
+            and link_type_map.get(il.id) == "internal"
+            and il.id not in scraped_link_ids
+        ]
+        failed_external_links = [
+            il for il in imported_links_all
+            if il.is_scraped
+            and link_type_map.get(il.id) == "external"
+            and il.id not in scraped_link_ids
+        ]
+
         has_parts_data    = len(scraped_parts) > 0
-        has_internal_data = len(internal_scraped) > 0
-        has_external_data = len(external_scraped) > 0
+        has_internal_data = len(internal_scraped) > 0 or len(failed_internal_links) > 0
+        has_external_data = len(external_scraped) > 0 or len(failed_external_links) > 0
 
         logger.info(
             f"Export info: parts={len(scraped_parts)}, "
-            f"internal_links={len(internal_scraped)}, "
-            f"external_links={len(external_scraped)}"
+            f"internal_links={len(internal_scraped)} (+{len(failed_internal_links)} failed), "
+            f"external_links={len(external_scraped)} (+{len(failed_external_links)} failed)"
         )
 
         if not has_parts_data and not has_internal_data and not has_external_data:
@@ -363,6 +379,79 @@ def export_to_excel():
                     c.fill  = black_fill
                     c.value = None
 
+        def _highlight_failed_rows(ws, first_failed_row: int):
+            """
+            Highlight every non-separator cell from first_failed_row to the last
+            row with a red background.  Separator columns are intentionally skipped
+            here because _apply_separator_fill (which runs after this) will paint
+            them black regardless.
+            """
+            from openpyxl.styles import PatternFill, Font
+            red_fill  = PatternFill(fill_type="solid", fgColor="FF0000")
+            white_bold = Font(bold=True, color="FFFFFF")
+            sep_col_indices = {
+                cell.column for cell in ws[1]
+                if cell.value and str(cell.value).startswith("___SEP_")
+            }
+            for row in ws.iter_rows(min_row=first_failed_row, max_row=ws.max_row):
+                for cell in row:
+                    if cell.column not in sep_col_indices:
+                        cell.fill = red_fill
+                        cell.font = white_bold
+
+        def _build_failed_internal_rows(failed_links: list) -> list[dict]:
+            """
+            Build one record per failed internal link.
+
+            Manufacturer Part Name  ← mfrName query param from the product_detail URL
+            Manufacturer Part Number ← itemNumber query param
+            All slot columns         ← empty strings
+            """
+            records = []
+            for il in failed_links:
+                try:
+                    params = parse_qs(urlparse(il.link).query)
+                    mfr_pn   = params.get("itemNumber", [""])[0]
+                    mfr_name = params.get("mfrName",    [""])[0]
+                except Exception:
+                    mfr_pn, mfr_name = "", ""
+                record: dict = {
+                    "Manufacturer Part Name":   mfr_name,
+                    "Manufacturer Part Number": mfr_pn,
+                }
+                for i, sfx in enumerate(_SUFFIXES):
+                    record[f"GSA PRICE{sfx}"]  = ""
+                    record[f"Unit{sfx}"]        = ""
+                    record[f"Contractor{sfx}"]  = ""
+                    record[f"contract#:{sfx}"]  = ""
+                    record[f"___SEP_{i}"]       = ""
+                records.append(record)
+            return records
+
+        def _build_failed_external_rows(failed_links: list, import_pn_map: dict) -> list[dict]:
+            """
+            Build one record per failed external link.
+
+            Imported Part Number ← from the import file (already stored in import_pn_map)
+            All slot columns     ← empty strings
+            """
+            records = []
+            for il in failed_links:
+                imported_pn = import_pn_map.get(il.id, "") or ""
+                record: dict = {"Imported Part Number": imported_pn}
+                for i, sfx in enumerate(_SUFFIXES):
+                    record[f"Part Variation{sfx}"]           = ""
+                    record[f"Manufacturer Part Number{sfx}"] = ""
+                    record[f"Manufacturer Part Name{sfx}"]   = ""
+                    record[f"Product Name{sfx}"]             = ""
+                    record[f"GSA PRICE{sfx}"]               = ""
+                    record[f"Unit{sfx}"]                     = ""
+                    record[f"Contractor{sfx}"]               = ""
+                    record[f"contract#:{sfx}"]               = ""
+                    record[f"___SEP_{i}"]                    = ""
+                records.append(record)
+            return records
+
         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
 
             # ── GSA Parts Data (price extraction pipeline) ────────────────────
@@ -398,19 +487,48 @@ def export_to_excel():
 
             # ── Internal Links (product-detail link extraction) ───────────────
             if has_internal_data:
-                df_int = _pivot_internal(internal_scraped)
+                df_int = _pivot_internal(internal_scraped) if internal_scraped else pd.DataFrame()
+                n_int_success = len(df_int)
+
+                failed_int_rows = _build_failed_internal_rows(failed_internal_links)
+                if failed_int_rows:
+                    df_failed_int = pd.DataFrame(failed_int_rows)
+                    df_int = pd.concat([df_int, df_failed_int], ignore_index=True) \
+                             if n_int_success > 0 else df_failed_int
+
                 df_int.to_excel(writer, sheet_name="Internal Links", index=False)
-                _style_header_internal(writer.sheets["Internal Links"])
-                _apply_separator_fill(writer.sheets["Internal Links"])
-                logger.info(f"Export 'Internal Links': {len(df_int)} product row(s)")
+                ws_int = writer.sheets["Internal Links"]
+                _style_header_internal(ws_int)
+                if failed_int_rows:
+                    _highlight_failed_rows(ws_int, first_failed_row=n_int_success + 2)
+                _apply_separator_fill(ws_int)
+                logger.info(
+                    f"Export 'Internal Links': {n_int_success} success, "
+                    f"{len(failed_int_rows)} failed (red rows)"
+                )
 
             # ── External Links (search/external link extraction) ──────────────
             if has_external_data:
-                df_ext = _pivot_external(external_scraped, link_import_pn)
+                df_ext = _pivot_external(external_scraped, link_import_pn) \
+                         if external_scraped else pd.DataFrame()
+                n_ext_success = len(df_ext)
+
+                failed_ext_rows = _build_failed_external_rows(failed_external_links, link_import_pn)
+                if failed_ext_rows:
+                    df_failed_ext = pd.DataFrame(failed_ext_rows)
+                    df_ext = pd.concat([df_ext, df_failed_ext], ignore_index=True) \
+                             if n_ext_success > 0 else df_failed_ext
+
                 df_ext.to_excel(writer, sheet_name="External Links", index=False)
-                _style_header_external(writer.sheets["External Links"])
-                _apply_separator_fill(writer.sheets["External Links"])
-                logger.info(f"Export 'External Links': {len(df_ext)} product row(s)")
+                ws_ext = writer.sheets["External Links"]
+                _style_header_external(ws_ext)
+                if failed_ext_rows:
+                    _highlight_failed_rows(ws_ext, first_failed_row=n_ext_success + 2)
+                _apply_separator_fill(ws_ext)
+                logger.info(
+                    f"Export 'External Links': {n_ext_success} success, "
+                    f"{len(failed_ext_rows)} failed (red rows)"
+                )
 
         # ── Filename ──────────────────────────────────────────────────────────
         parts_tag    = "parts_"    if has_parts_data    else ""
