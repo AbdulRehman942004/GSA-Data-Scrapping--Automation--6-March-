@@ -8,11 +8,16 @@ import threading
 
 state_lock = threading.Lock()
 
+# Phase 1 — GSA URL generation (imported_parts → gsa_links)
 is_link_generation_running: bool = False
-is_scraping_running: bool = False
-
 active_link_automation = None
-active_scraping_automation = None
 
-# Parallel scraping
+# Phase 2a — Price extraction (gsa_links → gsa_scraped_data)
+is_scraping_running: bool = False
+active_scraping_automation = None
 parallel_orchestrator = None
+
+# Phase 2b — Link extraction (imported_links[is_product_detail] → links_scraped_data)
+is_link_extraction_running: bool = False
+active_link_extractor = None          # single-worker fallback (unused in current flow)
+parallel_link_extractor = None        # ParallelLinkExtractionOrchestrator instance

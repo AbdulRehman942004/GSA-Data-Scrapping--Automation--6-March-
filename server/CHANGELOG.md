@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## v4.1.2 - 2026-04-08
+### Added
+Hightlighted the headings of internal and external link columns for better understandingd 
+
+## v4.1.1 - 2026-04-08
+### Added
+Added maunfactorer part number in internal and external link
+
+## v4.1.0 - 2026-04-08
+### Added
+Complete the functionality of import external link from excel sheet
+
+## v4.0.0 - 2026-04-08
+### Added
+Complete the functionality of import internal link from excel sheet
+
 ## v3.0.0 - 2026-03-27
 
 ### Added
